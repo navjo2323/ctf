@@ -280,7 +280,7 @@ cdef extern from "ctf.hpp" namespace "CTF":
 cdef extern from "ctf.hpp" namespace "CTF":
     cdef void TTTP_ "CTF::TTTP"[dtype](Tensor[dtype] * T, int num_ops, int * modes, Tensor[dtype] ** mat_list, bool aux_mode_first)
     cdef void MTTKRP_ "CTF::MTTKRP"[dtype](Tensor[dtype] * T, Tensor[dtype] ** mat_list, int mode, bool aux_mode_first)
-    cdef void Solve_Factor_ "CTF::Solve_Factor"[dtype](Tensor[dtype] * T, Tensor[dtype] ** mat_list,Tensor[dtype] * RHS, int mode, bool aux_mode_first)
+    cdef void Solve_Factor_ "CTF::Solve_Factor"[dtype](Tensor[dtype] * T, Tensor[dtype] ** mat_list,Tensor[dtype] * RHS, int mode, double regu, bool aux_mode_first)
     cdef void initialize_flops_counter_ "CTF::initialize_flops_counter"()
     cdef int64_t get_estimated_flops_ "CTF::get_estimated_flops"()
 
@@ -5851,9 +5851,9 @@ def MTTKRP(tensor A, mat_list, mode):
     free(tsrs)
     t_mttkrp.stop()
 
-def Solve_Factor(tensor A, mat_list, tensor R, mode):
+def Solve_Factor(tensor A, mat_list, tensor R, mode,regu):
     """
-    Solve_Factor(A, mat_list,R, mode)
+    Solve_Factor(A, mat_list,R, mode,regu)
     solves for a factor matrix parallelizing over rows given rhs, sparse tensor and list of factor matrices
     eg. for mode=0 order 3 tensor Computes LHS = einsum("ijk,jr,jz,kr,kz->irz",T,B,B,C,C) and solves each row with rhs
     in parallel 
@@ -5901,7 +5901,7 @@ def Solve_Factor(tensor A, mat_list, tensor R, mode):
     B = tensor(copy=A)
     RHS = tensor(copy=R)
     if A.dtype == np.float64:
-        Solve_Factor_[double](<Tensor[double]*>B.dt,tsrs,<Tensor[double]*>RHS.dt,A.ndim-mode-1,1)
+        Solve_Factor_[double](<Tensor[double]*>B.dt,tsrs,<Tensor[double]*>RHS.dt,A.ndim-mode-1,regu,1)
     else:
         raise ValueError('CTF PYTHON ERROR: Solve_Factor does not support this dtype')
     free(tsrs)

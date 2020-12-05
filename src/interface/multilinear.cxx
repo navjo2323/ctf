@@ -2,8 +2,11 @@
 #include "timer.h"
 #include "../mapping/mapping.h"
 #include "../shared/blas_symbs.h"
+#include "./semiring.h"
+
 
 namespace CTF {
+
   template<typename dtype>
   void TTTP(Tensor<dtype> * T, int num_ops, int const * modes, Tensor<dtype> ** mat_list, bool aux_mode_first){
     Timer t_tttp("TTTP");
@@ -686,7 +689,7 @@ namespace CTF {
   
 
   template<typename dtype>
-  void Solve_Factor(Tensor<dtype> * T, Tensor<dtype> ** mat_list, Tensor<dtype> * RHS, int mode, bool aux_mode_first){
+  void Solve_Factor(Tensor<dtype> * T, Tensor<dtype> ** mat_list, Tensor<dtype> * RHS, int mode, double regu, bool aux_mode_first){
     // Get the rhs precomputed in mat_list[mode]
     // Mode defines what factor index we're computing
 
@@ -878,95 +881,238 @@ namespace CTF {
       int cm_rank,cm_size;
       MPI_Comm_rank(slice_comm, &cm_rank);
       MPI_Comm_size(slice_comm,&cm_size);
-      // Define an array of I' x R x R LHS_list where I' is the number of rows owned by each process and divides exactly with the number of processes, i.e., with some padding
       
-      int I = T->pad_edge_len[mode]/T->edge_map[mode].np ;
+      int64_t I = T->pad_edge_len[mode]/T->edge_map[mode].np ;
       int R = mat_list[0]->lens[1-aux_mode_first];
-      int I_s = std::ceil(float(I)/cm_size) ;
+      
+      
+      Timer t_trav("Sort_nnz");
+      Timer t_LHS_work("LHS_work");
+      Timer t_solve_lhs("LHS_solves");
+      t_trav.start() ; 
 
-      double * LHS_list = (double *) malloc(I_s*cm_size*R*R* sizeof(double) );
-      double * arrs_buf = (double *) malloc(I_s*cm_size*R* sizeof(double) );
+      /*
+      std::sort(pairs,pairs+ npair,[T,phys_phase,mode,ldas](Pair<dtype> i1, Pair<dtype> i2){
+        return (((i1.k/ldas[mode])%T->lens[mode])/phys_phase[mode] < ((i2.k/ldas[mode])%T->lens[mode])/phys_phase[mode] ) ; 
+      }) ;
+      */
+      
 
-      std::fill(
-       LHS_list,
-       LHS_list + I_s*cm_size*R*R,
-       0.f);
-      std::fill(
-       arrs_buf,
-       arrs_buf + I_s*cm_size*R,
-       0.f);
+      Pair<dtype> * pairs_copy = (Pair<dtype>*)malloc(npair*2*sizeof(int64_t)) ;
+      int * indices = (int *)malloc(npair*sizeof(int64_t)) ;
+      int64_t * c = (int64_t *) calloc(I+1,sizeof(int64_t));
+      int64_t * count = (int64_t *) calloc(I,sizeof(int64_t));
 
-      //define how the symmetric arrays are referenced, keep this consistent throughout
-      char* uplo = "L" ;
-      int scale = 1 ;
-      int info =0 ; 
-      Timer t_solve_work("Solve_work");
-      t_solve_work.start();
+      
+      for (int64_t i=0; i<npair ; i++){
+        int64_t key = pairs[i].k/ldas[mode] ; 
+        indices[i] = (key%T->lens[mode])/phys_phase[mode];
+        ++c[indices[i]];
+        ++count[indices[i]] ; 
+      }
 
-      int * inds = (int*)malloc(T->order*sizeof(int));
-      double * row = (double *) malloc(R* sizeof(double) );
+      for(int64_t i=1;i<=I;i++){
+        c[i]+=c[i-1];            
+      }
 
-      for (int64_t i=0; i<npair; i++){
-        int64_t key = pairs[i].k;
-        for (int j=0; j<T->order; j++){
-          int64_t ke = key/ldas[j];
-          inds[j] = (ke%T->lens[j])/phys_phase[j];
+      for(int64_t i=npair-1;i>=0;i--){
+        pairs_copy[c[indices[i]]-1]=pairs[i];        
+        --c[indices[i]] ;       
+      } 
+
+      std::copy(pairs_copy, pairs_copy+npair,pairs)  ;
+
+      free(c);
+      free(pairs_copy);
+      free(indices);
+      
+      t_trav.stop();
+      
+      //int64_t I_s = std::ceil(float(I)/cm_size) ;
+      int batches = 1 ;
+      int64_t batched_I = I ; 
+      int64_t max_memuse = CTF_int::proc_bytes_available() ;
+      int64_t I_s ;
+      int64_t rows ;
+      int buffer = 2048*5; 
+
+      while (true){
+        if (max_memuse > ((std::ceil(float(I/batches)/cm_size)*cm_size*(R+1)*R) + buffer*R + 10 )*(int64_t)sizeof(dtype) *(int64_t)sizeof(dtype) ) {
+          break ;
         }
-        std::fill(
-          row,
-          row + R,
-          1.) ;
-        for (int kk=0; kk<kd; kk++){
-          for (int j=0; j<T->order; j++){
-            if (j != mode){
-              row[kk*mat_strides[2*j+1]] *= arrs[j][inds[j]*mat_strides[2*j]+kk*mat_strides[2*j+1]];
+        else{
+          batches +=1 ;  
+        }
+      }
+      MPI_Allreduce(MPI_IN_PLACE, &batches, 1, MPI_INT, MPI_MAX, T->wrld->comm);
+      batched_I = I/batches ; 
+
+      int64_t total= 0;
+      for (int b =0 ; b<batches ; b++){
+        if (b != batches-1){
+          rows = batched_I; 
+        } 
+        else{
+          rows = batched_I + I%batches ;
+        }
+
+        I_s = std::ceil(float(rows)/cm_size) ;
+
+        dtype * LHS_list = (dtype *) calloc(I_s*cm_size*R*R,sizeof(dtype) );
+        if (LHS_list == 0){
+          printf("Memory full LHS for proc [%d] \n",T->wrld->rank);
+        }
+        
+        //define how the symmetric arrays are referenced, keep this consistent throughout
+        char* uplo = "L" ;
+        char* trans = "N" ; //if want to incorporate column major then change this 
+        int scale = 1 ;
+        double alpha = 1.0 ; 
+        int info =0 ; 
+        
+        
+        
+        t_LHS_work.start();
+        Timer t_scatter("Scatter and Sc_reduce");
+        //int * inds = (int*)malloc(T->order*sizeof(int));
+        
+        int sweeps ; 
+          
+        //double * row = (double *) malloc(R* sizeof(double) );
+        dtype * H = (dtype *) calloc(buffer*R,sizeof(dtype) ) ;
+        
+        
+        
+        
+        for (int64_t j =0  ; j< rows ; j++){ 
+          sweeps = count[j+ b*batched_I]/buffer ;
+
+          if (sweeps >0){
+            for (int s = 0 ; s< sweeps ; s++){
+#ifdef _OPENMP
+              #pragma omp parallel for 
+#endif
+              for(int q = 0 ; q<buffer ; q++){
+                int64_t key = pairs[total + q].k ;
+                std::fill(
+                H + q*R,
+                H + (q+1)*R ,
+                std ::sqrt(pairs[total + q].d)) ;
+                for(int i = 0 ; i < T->order ; i++){
+                  if (i!=mode){
+                    int64_t ke= key/ldas[i];
+                    int index = (ke%T->lens[i])/phys_phase[i];
+                    CTF_int::default_vec_mul(&arrs[i][index*R], H+q*R, H+q*R, R) ;
+                  }
+                }
+              }
+              CTF_BLAS::syrk<dtype>(uplo,trans,&R,&buffer,&alpha,H,&R,&alpha,&LHS_list[j*R*R],&R) ;
+              std::fill(
+                  H,
+                  H+ buffer*R,
+                  0.);
+              total+=buffer ; 
             }
           }
-          //create local matrix of size k x R where k is the batch of rows we want to take outer product of later
-          //Currently just accumulating outer products one by one
+          sweeps = count[j+ b*batched_I]%buffer ;
+          if (sweeps>0){
+#ifdef _OPENMP
+            #pragma omp parallel for
+#endif
+            for(int q = 0 ; q<sweeps ; q++){
+              int64_t key = pairs[total + q].k ;
+              std::fill(
+              H + q*R,
+              H + (q+1)*R ,
+              std ::sqrt(pairs[total + q].d)) ;
+              for(int i = 0 ; i < T->order ; i++){
+                if (i!=mode){
+                  int64_t ke= key/ldas[i];
+                  int index = (ke%T->lens[i])/phys_phase[i];
+                  CTF_int::default_vec_mul(&arrs[i][index*R], H+q*R, H+q*R, R) ;
+                }
+              }
+            }
+            CTF_BLAS::syrk<dtype>(uplo,trans,&R,&sweeps,&alpha,H,&R,&alpha,&LHS_list[j*R*R],&R) ;
+            std::fill(
+                H,
+                H+ sweeps*R,
+                0.);
+            total+=sweeps ; 
+          } 
         }
-        CTF_BLAS::SYR(uplo,&R,&pairs[i].d,row,&scale,&LHS_list[inds[mode]*R*R],&R); //outer product of row
-          // Can update to SYRK when we have a matrix buffer
+
+        
+        free(H) ;
+        //free(inds) ;
+        
+        t_LHS_work.stop();
+
+        //scatter reduce left hand sides and scatter right hand sides in a buffer
+        int* Recv_count = (int*) malloc(sizeof(int)*cm_size) ; 
+        std::fill(
+         Recv_count,
+         Recv_count + cm_size,
+         I_s*R*R);
+
+        
+        t_scatter.start() ; 
+        MPI_Reduce_scatter( MPI_IN_PLACE, LHS_list, Recv_count , MPI_DOUBLE, MPI_SUM, slice_comm );
+        free(Recv_count);
+
+        for(int64_t i =0 ; i< I_s ; i++){
+          for(int r = 0 ; r<R ; r++){
+            LHS_list[R*R*i +r*R +r]+=regu ; 
+          }
+        }
+        
+        
+
+        dtype * arrs_buf = (dtype *) calloc(I_s*cm_size*R,sizeof(dtype) );
+
+        if (b == batches-1){
+          std::copy(&arrs[mode][b*batched_I*R],&arrs[mode][I*R],arrs_buf) ;
+        }
+        else{
+          std::copy(&arrs[mode][b*batched_I*R],&arrs[mode][(b+1)*batched_I*R],arrs_buf) ; 
+        }
+          
+        if (cm_rank == 0){
+          MPI_Scatter(arrs_buf, I_s*R, MPI_DOUBLE, MPI_IN_PLACE, I_s*R,  
+                     MPI_DOUBLE, 0, slice_comm);
+        }
+        else{
+          MPI_Scatter(NULL, I_s*R, MPI_DOUBLE, arrs_buf, I_s*R,  
+                     MPI_DOUBLE, 0, slice_comm);
+        }
+        t_scatter.stop() ; 
+        //call local spd solve on I/cm_size different systems locally (avoid calling solve on padding in lhs)
+        t_solve_lhs.start() ;
+        for (int i=0; i<I_s; i++){
+          if (i + cm_rank*I_s + b*batched_I < I - (T->lens[mode] % T->edge_map[mode].np > 0 )  + (jr< T->lens[mode] % T->edge_map[mode].np ))
+            CTF_BLAS::posv<dtype>(uplo,&R,&scale,&LHS_list[i*R*R],&R,&arrs_buf[i*R],&R,&info) ;
+        }
+        t_solve_lhs.stop();
+
+        free(LHS_list) ;
+
+        //allgather on slice_comm should be used for preserving the mttkrp like mapping
+        if (cm_rank==0){
+          MPI_Gather(MPI_IN_PLACE, I_s*R, MPI_DOUBLE, arrs_buf, I_s*R, MPI_DOUBLE, 0, slice_comm);
+        }
+        else{
+          MPI_Gather(arrs_buf, I_s*R, MPI_DOUBLE, NULL, I_s*R, MPI_DOUBLE, 0, slice_comm);
+        }
+        
+        std::copy(arrs_buf, arrs_buf + rows*R, &arrs[mode][b*batched_I*R]) ; 
+        
+        free(arrs_buf) ;
       }
-      free(row) ; 
-      free(inds);
 
-      //scatter reduce left hand sides and scatter right hand sides in a buffer
-      int* Recv_count = (int*) malloc(sizeof(int)*cm_size) ; 
-      std::fill(
-       Recv_count,
-       Recv_count + cm_size,
-       I_s*R*R);
-      MPI_Reduce_scatter( MPI_IN_PLACE, LHS_list, Recv_count , MPI_DOUBLE, MPI_SUM, slice_comm );
-      free(Recv_count);
-
-      MPI_Scatter(arrs[mode], I_s*R, MPI_DOUBLE, arrs_buf, I_s*R,  
-                   MPI_DOUBLE, 0, slice_comm);
-
-      //call local spd solve on I/cm_size different systems locally (avoid calling solve on padding in lhs)
-      
-      for (int i=0; i<I_s; i++){
-        if (i + cm_rank*I_s < I - (T->lens[mode] % T->edge_map[mode].np > 0 )  + (jr< T->lens[mode] % T->edge_map[mode].np ))
-          CTF_BLAS::POSV(uplo,&R,&scale,&LHS_list[i*R*R],&R,&arrs_buf[i*R],&R,&info) ;
-      }
-      t_solve_work.stop();
-
-      free(LHS_list) ;
-
-      //allgather on slice_comm should be used for preserving the mttkrp like mapping
-      if (cm_rank==0)
-        MPI_Gather(MPI_IN_PLACE, I_s*R, MPI_DOUBLE, arrs_buf, I_s*R, MPI_DOUBLE, 0, slice_comm);
-      else{
-        MPI_Gather(arrs_buf, I_s*R, MPI_DOUBLE, NULL, I_s*R, MPI_DOUBLE, 0, slice_comm);
-      }
-      
-      if (cm_rank==0)
-        memcpy(arrs[mode], arrs_buf, I*R*sizeof(arrs_buf[0]));
+      free(count) ;
 
       MPI_Comm_free(&slice_comm);
-      free(arrs_buf) ; 
 
-      
       for (int j=0 ; j< T->order ; j++){
         if (j==mode){
           if (redist_mats[j] != NULL){
