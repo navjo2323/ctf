@@ -6,6 +6,7 @@ import ctf
 import os
 import sys
 import numpy.linalg as la
+import numpy as np
 
 def allclose(a, b):
     return abs(ctf.to_nparray(a) - ctf.to_nparray(b)).sum() <= 1e-5
@@ -175,6 +176,7 @@ class KnowValues(unittest.TestCase):
             mats = []
             num = numpy.random.randint(N)
             lens = numpy.random.randint(10,20,N)
+            regu = 1e-04
             for i in range(N):
                 if i !=num:
                     mats.append(ctf.random.random([lens[i],R]))
@@ -198,8 +200,8 @@ class KnowValues(unittest.TestCase):
             rhs_np = RHS.to_nparray()
             ans = numpy.zeros_like(rhs_np)
             for i in range(mats[num].shape[0]):
-                ans[i,:] = la.solve(lhs_np[i],rhs_np[i,:])
-            ctf.Solve_Factor(A,mats,RHS,num)
+                ans[i,:] = la.solve(lhs_np[i]+regu*np.eye(R),rhs_np[i,:])
+            ctf.Solve_Factor(A,mats,RHS,num,regu)
             self.assertTrue(numpy.allclose(ans, mats[num].to_nparray()))
 
     def test_TTTP_vec(self):
