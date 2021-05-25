@@ -281,6 +281,11 @@ cdef extern from "ctf.hpp" namespace "CTF":
     cdef void TTTP_ "CTF::TTTP"[dtype](Tensor[dtype] * T, int num_ops, int * modes, Tensor[dtype] ** mat_list, bool aux_mode_first)
     cdef void MTTKRP_ "CTF::MTTKRP"[dtype](Tensor[dtype] * T, Tensor[dtype] ** mat_list, int mode, bool aux_mode_first)
     cdef void Solve_Factor_ "CTF::Solve_Factor"[dtype](Tensor[dtype] * T, Tensor[dtype] ** mat_list,Tensor[dtype] * RHS, int mode, double regu, bool aux_mode_first)
+    cdef void Sparse_add_ "CTF::Sparse_add"[dtype](Tensor[dtype] * T, Tensor[dtype] * M, double alpha, double beta)
+    cdef void Sparse_mul_ "CTF::Sparse_mul"[dtype](Tensor[dtype] * T, Tensor[dtype] * M )
+    cdef void Sparse_exp_ "CTF::Sparse_exp"[dtype](Tensor[dtype] * T)
+    cdef void Sparse_log_ "CTF::Sparse_log"[dtype](Tensor[dtype] * T)
+    cdef void get_index_tensor_ "CTF::get_index_tensor"[dtype](Tensor[dtype] * T)
     cdef void initialize_flops_counter_ "CTF::initialize_flops_counter"()
     cdef int64_t get_estimated_flops_ "CTF::get_estimated_flops"()
 
@@ -5843,9 +5848,8 @@ def MTTKRP(tensor A, mat_list, mode):
             else:
                 if k != mat_list[i].shape[1]:
                     raise ValueError('CTF PYTHON ERROR: mat_list second mode lengths of tensor must match')
-    B = tensor(copy=A)
     if A.dtype == np.float64:
-        MTTKRP_[double](<Tensor[double]*>B.dt,tsrs,A.ndim-mode-1,1)
+        MTTKRP_[double](<Tensor[double]*>A.dt,tsrs,A.ndim-mode-1,1)
     else:
         raise ValueError('CTF PYTHON ERROR: MTTKRP does not support this dtype')
     free(tsrs)
@@ -5874,7 +5878,7 @@ def Solve_Factor(tensor A, mat_list, tensor R, mode,regu):
     t_solve_factor = timer("pySolve_factor")
     t_solve_factor.start()
     if len(mat_list) != A.ndim:
-        raise ValueError('CTF PYTHON ERROR: mat_list argument to MTTKRP must be of same length as ndim')
+        raise ValueError('CTF PYTHON ERROR: mat_list argument to Solve_Factor must be of same length as ndim')
     k = -1
     tsrs = <Tensor[double]**>malloc(len(mat_list)*sizeof(ctensor*))
     #tsr_list = []
@@ -5906,6 +5910,76 @@ def Solve_Factor(tensor A, mat_list, tensor R, mode,regu):
         raise ValueError('CTF PYTHON ERROR: Solve_Factor does not support this dtype')
     free(tsrs)
     t_solve_factor.stop()
+
+def Sparse_add(tensor A, tensor B,alpha=1.0,beta=1.0):
+    """
+    Add two sparse tensors A and B with identical distributions
+
+    """
+    t_sp_add = timer("pySparse_add")
+    t_sp_add.start()
+    
+    if A.dtype == np.float64:
+        Sparse_add_[double](<Tensor[double]*>A.dt,<Tensor[double]*>B.dt,alpha,beta)
+    else:
+        raise ValueError('CTF PYTHON ERROR: Sparse_add does not support this dtype')
+    t_sp_add.stop()
+
+def Sparse_mul(tensor A, tensor B):
+    """
+    Multiply two sparse tensors A and B with identical distributions
+
+    """
+    t_sp_add = timer("pySparse_mul")
+    t_sp_add.start()
+    
+    if A.dtype == np.float64:
+        Sparse_mul_[double](<Tensor[double]*>A.dt,<Tensor[double]*>B.dt)
+    else:
+        raise ValueError('CTF PYTHON ERROR: Sparse_mul does not support this dtype')
+    t_sp_add.stop()
+
+def Sparse_exp(tensor A):
+    """
+    Multiply two sparse tensors A and B with identical distributions
+
+    """
+    t_sp_exp = timer("pySparse_exp")
+    t_sp_exp.start()
+    
+    if A.dtype == np.float64:
+        Sparse_exp_[double](<Tensor[double]*>A.dt)
+    else:
+        raise ValueError('CTF PYTHON ERROR: Sparse_exp does not support this dtype')
+    t_sp_exp.stop()
+
+def Sparse_log(tensor A):
+    """
+    Multiply two sparse tensors A and B with identical distributions
+
+    """
+    t_sp_log = timer("pySparse_log")
+    t_sp_log.start()
+    
+    if A.dtype == np.float64:
+        Sparse_log_[double](<Tensor[double]*>A.dt)
+    else:
+        raise ValueError('CTF PYTHON ERROR: Sparse_log does not support this dtype')
+    t_sp_log.stop()
+
+def get_index_tensor(tensor A):
+    """
+    Multiply two sparse tensors A and B with identical distributions
+
+    """
+    t_ind_tnsr = timer("pyget_index_tensor")
+    t_ind_tnsr.start()
+    
+    if A.dtype == np.float64:
+        get_index_tensor_[double](<Tensor[double]*>A.dt)
+    else:
+        raise ValueError('CTF PYTHON ERROR: get_index_tensor does not support this dtype')
+    t_ind_tnsr.stop()
 
 def svd(tensor A, rank=None, threshold=None):
     """
