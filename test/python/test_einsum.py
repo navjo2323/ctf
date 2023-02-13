@@ -204,6 +204,46 @@ class KnowValues(unittest.TestCase):
             ctf.Solve_Factor(A,mats,RHS,num,regu)
             self.assertTrue(numpy.allclose(ans, mats[num].to_nparray()))
 
+    def test_Solve_Factor_Tucker(self):
+        N=3
+        for num in range(3):
+            mats = []
+            #num = numpy.random.randint(N)
+            lens = numpy.random.randint(10,20,N)
+            ranks = numpy.random.randint(2,5,N)
+            regu = 1e-04
+            for i in range(N):
+                if i !=num:
+                    mats.append(ctf.random.random([lens[i],ranks[i]]))
+                else:
+                    mats.append(ctf.tensor([lens[i],ranks[i]]))
+            RHS = ctf.random.random([lens[num],ranks[num]])
+            core = ctf.random.random(ranks)
+            A = ctf.tensor(lens,sp=1)
+            A.fill_sp_random(1., 1., 0.5)
+            T_inds = "".join([chr(ord('a')+i) for i in range(A.ndim)])
+            core_inds = "".join([chr(ord('r')+i) for i in range(core.ndim)])
+            core_inds2 = "".join([chr(ord('l')+i) for i in range(core.ndim)])
+            einstr= T_inds+','
+            lst_mat = []
+            lst_mat.append(A.to_nparray())
+            for i in range(3):
+                if i != num:
+                    einstr+=chr(ord('a')+i) + chr(ord('r')+i) + ','
+                    lst_mat.append(mats[i].to_nparray())
+                    einstr+=chr(ord('a')+i) + chr(ord('l')+i) + ','
+                    lst_mat.append(mats[i].to_nparray())
+            lst_mat.append(core.to_nparray())
+            lst_mat.append(core.to_nparray())
+            einstr+= core_inds + ','+core_inds2+'->'+chr(ord('a')+num)+chr(ord('r')+num)+chr(ord('l')+num)
+            lhs_np = numpy.einsum(einstr,*lst_mat,optimize=True)
+            rhs_np = RHS.to_nparray()
+            ans = numpy.zeros_like(rhs_np)
+            for i in range(mats[num].shape[0]):
+                ans[i,:] = la.solve(lhs_np[i]+regu*np.eye(ranks[num]),rhs_np[i,:])
+            ctf.Solve_Factor_Tucker(A,mats,core,RHS,num,regu)
+            self.assertTrue(numpy.allclose(ans, mats[num].to_nparray()))
+
     def test_TTTP_vec(self):
         A = numpy.random.random((4, 3, 5))
         u = numpy.random.random((4,))

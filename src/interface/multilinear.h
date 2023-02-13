@@ -74,6 +74,9 @@ namespace CTF {
 
   template<typename dtype>
   void get_index_tensor(Tensor<dtype> * T);
+
+  template<typename dtype>
+  void Solve_Factor_Tucker(Tensor<dtype> * T, Tensor<dtype> ** mat_list, Tensor<dtype> * core, Tensor<dtype> * RHS, int mode, double regu, bool aux_mode_first);
 }
 
 #endif
