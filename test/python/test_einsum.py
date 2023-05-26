@@ -170,6 +170,32 @@ class KnowValues(unittest.TestCase):
                 ctf.MTTKRP(A, mats, i)
                 self.assertTrue(allclose(ans, mats[i]))
 
+    def test_MTTKRP_Tucker_mat(self):
+        N=3
+        for num in range(3):
+            ranks = numpy.random.randint(2,5,N)
+            lens = numpy.random.randint(5, 10, N)
+            A = ctf.tensor(lens)
+            A.fill_sp_random(-1.,1.,.5)
+            core = ctf.random.random(ranks)
+            mats = []
+            for i in range(N):
+                mats.append(ctf.random.random([lens[i],ranks[i]]))
+            lst_mat = []
+            lst_mat.append(A.to_nparray())
+            T_inds = "".join([chr(ord('a')+i) for i in range(A.ndim)])
+            einstr = T_inds+','
+            core_inds = "".join([chr(ord('r')+i) for i in range(core.ndim)])
+            for i in range(N):
+                if i != num:
+                    einstr+=chr(ord('a')+i) + chr(ord('r')+i) + ','
+                    lst_mat.append(mats[i].to_nparray())
+            lst_mat.append(core.to_nparray())
+            einstr+= core_inds + '->'+chr(ord('a')+num)+chr(ord('r')+num)
+            ans = numpy.einsum(einstr,*lst_mat,optimize=True)
+            ctf.MTTKRP_Tucker(A,mats,core,num)
+            self.assertTrue(numpy.allclose(ans, mats[num].to_nparray()))
+
     def test_Solve_Factor_mat(self):
         R = 10
         for N in range(3,6):
@@ -210,7 +236,7 @@ class KnowValues(unittest.TestCase):
             mats = []
             #num = numpy.random.randint(N)
             lens = numpy.random.randint(10,20,N)
-            ranks = numpy.random.randint(2,5,N)
+            ranks = numpy.random.randint(2,6,N)
             regu = 1e-04
             for i in range(N):
                 if i !=num:
@@ -243,7 +269,7 @@ class KnowValues(unittest.TestCase):
                 ans[i,:] = la.solve(lhs_np[i]+regu*np.eye(ranks[num]),rhs_np[i,:])
             ctf.Solve_Factor_Tucker(A,mats,core,RHS,num,regu)
             self.assertTrue(numpy.allclose(ans, mats[num].to_nparray()))
-
+    
     def test_TTTP_vec(self):
         A = numpy.random.random((4, 3, 5))
         u = numpy.random.random((4,))
@@ -270,6 +296,42 @@ class KnowValues(unittest.TestCase):
         cx = ctf.astensor(x)
         cy = ctf.astensor(y)
         cans = ctf.TTTP(cA,[cu,cv,cw,cx,cy])
+        self.assertTrue(allclose(ans, cans))
+
+    def test_TTTP_Tucker(self):
+        N = 3
+        lens = np.random.randint(10,15,N)
+        A = ctf.tensor(lens,sp=1)
+        A.fill_sp_random(-1., 1., 0.5)
+        ranks = numpy.random.randint(2,6,N)
+        lst_mat = []
+        ctf_lst_mat = []
+        for i in range(N):
+            ctf_lst_mat.append(ctf.random.random((lens[i], ranks[i])))
+        core = ctf.random.random(ranks)
+        lst_mat.append(A.to_nparray())
+        for i in range(N):
+            lst_mat.append(ctf_lst_mat[i].to_nparray())
+        lst_mat.append(core.to_nparray())
+        ans = numpy.einsum("ijk,ia,jb,kc,abc->ijk",*lst_mat,optimize=True)
+        cans = ctf.TTTP_Tucker(A,ctf_lst_mat,core)
+        self.assertTrue(allclose(ans, cans))
+    def test_TTMC(self):
+        N =3
+        lens = np.random.randint(10,15,N)
+        A = ctf.tensor(lens,sp=1)
+        A.fill_sp_random(-1., 1., 0.5)
+        ranks = numpy.random.randint(2,6,N)
+        lst_mat = []
+        ctf_lst_mat = []
+        for i in range(N):
+            ctf_lst_mat.append(ctf.random.random((lens[i], ranks[i])))
+        core = ctf.random.random(ranks)
+        lst_mat.append(A.to_nparray())
+        for i in range(N):
+            lst_mat.append(ctf_lst_mat[i].to_nparray())
+        ans = numpy.einsum("ijk,ia,jb,kc->abc",*lst_mat,optimize=True)
+        cans = ctf.TTMC(A,ctf_lst_mat,core)
         self.assertTrue(allclose(ans, cans))
 
     def test_sp_TTTP_mat(self):

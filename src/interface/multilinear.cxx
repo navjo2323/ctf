@@ -1201,6 +1201,37 @@ namespace CTF {
   }
 
   template<typename dtype>
+  double Sparse_inner_prod(Tensor<dtype> * T, Tensor<dtype> * M){
+    IASSERT(T->order == M->order) ;
+    IASSERT(T->is_sparse && M->is_sparse) ;
+
+    int64_t npair1,npair2;
+    Pair<dtype> * pairs1 ; 
+    Pair<dtype> * pairs2 ;
+
+    npair1 = T->nnz_loc ;
+    npair2 = M->nnz_loc ;
+    IASSERT(npair1==npair2);
+    for (int i=0; i<T->order; i++){
+      IASSERT(T->edge_map[i].calc_phys_phase() == M->edge_map[i].calc_phys_phase());
+    }
+    pairs1 = (Pair<dtype> *)T->data;
+    pairs2 = (Pair<dtype> *)M->data;
+
+    double val=0.0;
+
+    /*CTF_int::default_vec_mul
+                    */
+    for(int64_t i=0;i<npair1;i++){
+       val+= pairs1[i].d *pairs2[i].d;
+    }
+
+    MPI_Allreduce(MPI_IN_PLACE, &val, 1, MPI_DOUBLE, MPI_SUM, T->wrld->comm);
+
+    return val;
+  }
+
+  template<typename dtype>
   void Sparse_exp(Tensor<dtype> * T){
     IASSERT(T->is_sparse) ;
 
@@ -1255,27 +1286,34 @@ namespace CTF {
 
   }
 
-template<typename dtype>
+  template<typename dtype>
   void Solve_Factor_Tucker(Tensor<dtype> * T, Tensor<dtype> ** mat_list, Tensor<dtype> * core, Tensor<dtype> * RHS, int mode, double regu, bool aux_mode_first){
     // Mode defines what factor index we're computing
+    // The re-destribution strategy is not slicing factors as solve assumes full row of factors can fit
+    // can be integrated later
 
     Timer t_solve_factor("Solve_Factor_Tucker");
     t_solve_factor.start();
-    int k = -1;
-    bool is_vec = mat_list[0]->order == 1;
-    if (!is_vec)
-      k = mat_list[0]->lens[1-aux_mode_first];
+    int k[T->order] ;
+    for (int i =0 ; i< T->order; i++)
+      k[i] = -1;
+    bool is_vec[T->order];
+    for (int i =0 ; i< T->order ; i++)
+      is_vec[i] = mat_list[i]->order == 1;
+    for (int i =0 ; i< T->order ; i++){
+      if (!is_vec[i]){
+        k[i] = mat_list[i]->lens[1-aux_mode_first];
+      }
+    }
     IASSERT(mode >= 0 && mode < T->order);
     for (int i=0; i<T->order; i++){
-      IASSERT(is_vec || T->lens[i] == mat_list[i]->lens[aux_mode_first]);
+      IASSERT(is_vec[i] || T->lens[i] == mat_list[i]->lens[aux_mode_first]);
       IASSERT(!mat_list[i]->is_sparse);
     }
     dtype ** arrs = (dtype**)malloc(sizeof(dtype*)*T->order);
     int64_t * ldas = (int64_t*)malloc(T->order*sizeof(int64_t));
     int * phys_phase = (int*)malloc(T->order*sizeof(int));
     int * mat_strides = NULL;
-    if (!is_vec)
-      mat_strides = (int*)malloc(2*T->order*sizeof(int));
     for (int i=0; i<T->order; i++){
       phys_phase[i] = T->edge_map[i].calc_phys_phase();
     }
@@ -1301,360 +1339,280 @@ template<typename dtype>
       par_idx[i] = 'a'+i+1;
     }
     char mat_idx[2];
-    int slice_st[2];
-    int slice_end[2];
-    int k_start = 0;
-    int kd = 0;
-    int div = 1;
-    for (int d=0; d<div; d++){
-      k_start += kd;
-      kd = k/div + (d < k%div);
-      int k_end = k_start + kd;
+    
+    Timer t_solve_remap("Solve_remap_mats");
+    t_solve_remap.start();
+    int nrow[T->order], ncol[T->order];
+    for (int i=0; i<T->order; i++){
+      Tensor<dtype> * mat ; 
+      if (i != mode){
+         mat = mat_list[i];
+      }
+      else{
+         mat = RHS;
+      }
+      int64_t tot_sz ;
+      if (is_vec[i])
+        tot_sz = T->lens[i];
+      else
+        tot_sz = T->lens[i]*k[i];
 
-      Timer t_solve_remap("Solve_remap_mats");
-      t_solve_remap.start();
-      for (int i=0; i<T->order; i++){
-        Tensor<dtype> mmat;
-        Tensor<dtype> * mat ; 
-        if (i != mode){
-           mat = mat_list[i];
-        }
-        else{
-           mat = RHS;
-        }
-        int64_t tot_sz;
-        if (is_vec)
-          tot_sz = T->lens[i];
-        else
-          tot_sz = T->lens[i]*kd;
-        if (div>1){
-          if (aux_mode_first){
-            slice_st[0] = k_start;
-            slice_st[1] = 0;
-            slice_end[0] = k_end;
-            slice_end[1] = T->lens[i];
-            mat_strides[2*i+0] = kd;
-            mat_strides[2*i+1] = 1;
-          } else {
-            slice_st[1] = k_start;
-            slice_st[0] = 0;
-            slice_end[1] = k_end;
-            slice_end[0] = T->lens[i];
-            mat_strides[2*i+0] = 1;
-            mat_strides[2*i+1] = T->lens[i];
-          }
-          if (i!=mode){
-            mmat = mat_list[i]->slice(slice_st, slice_end);
-          }
+      if (aux_mode_first){
+        nrow[i] = k[i];
+        ncol[i] = T->lens[i];
+      } else {
+        nrow[i] = T->lens[i];
+        ncol[i] = k[i];
+      }
+      if (phys_phase[i] == 1){
+        redist_mats[i] = NULL;
+        if (T->wrld->np == 1){
+          if (i!= mode)
+            arrs[i] = (dtype*)mat_list[i]->data;
           else{
-            mmat = RHS->slice(slice_st, slice_end);
-          }
-          mat = &mmat;
-        } else if (!is_vec) {
-          if (aux_mode_first){
-            mat_strides[2*i+0] = k;
-            mat_strides[2*i+1] = 1;
-          } else {
-            mat_strides[2*i+0] = 1;
-            mat_strides[2*i+1] = T->lens[i];
-          }
+            arrs[i] = (dtype*)mat_list[i]->data;
+            mat->read_all(arrs[i], true);
+          } 
         }
-        int nrow, ncol;
+        else if (i!=mode) {
+          arrs[i] = (dtype*)T->sr->alloc(tot_sz);
+          mat->read_all(arrs[i], true);
+        } else{
+          if (is_vec[i])
+            redist_mats[i] = new Vector<dtype>(mat_list[i]->lens[0], 'a'-1, par[par_idx], Idx_Partition(), 0, *T->wrld, *T->sr);
+          else {
+            char nonastr[2];
+            nonastr[0] = 'a'-1;
+            nonastr[1] = 'a'-2;
+            redist_mats[i] = new Matrix<dtype>(nrow[i], ncol[i], nonastr, par[par_idx], Idx_Partition(), 0, *T->wrld, *T->sr);
+          }
+          arrs[i] = (dtype*)redist_mats[i]->data;
+          mat->read_all(arrs[i], true);
+        }
+      } 
+      else {
+        int topo_dim = T->edge_map[i].cdt;
+        IASSERT(T->edge_map[i].type == CTF_int::PHYSICAL_MAP);
+        IASSERT(!T->edge_map[i].has_child || T->edge_map[i].child->type != CTF_int::PHYSICAL_MAP);
         if (aux_mode_first){
-          nrow = kd;
-          ncol = T->lens[i];
+          mat_idx[0] = 'a';
+          mat_idx[1] = par_idx[topo_dim];
         } else {
-          nrow = T->lens[i];
-          ncol = kd;
+          mat_idx[0] = par_idx[topo_dim];
+          mat_idx[1] = 'a';
         }
-        if (phys_phase[i] == 1){
-          redist_mats[i] = NULL;
-          if (T->wrld->np == 1){
-            IASSERT(div == 1);
-            if (i!= mode)
-              arrs[i] = (dtype*)mat_list[i]->data;
-            else{
-              arrs[i] = (dtype*)mat_list[i]->data;
-              mat->read_all(arrs[i], true);
-            } 
+
+        int comm_lda = 1;
+        for (int l=0; l<topo_dim; l++){
+          comm_lda *= T->topo->dim_comm[l].np;
+        }
+        CTF_int::CommData cmdt(T->wrld->rank-comm_lda*T->topo->dim_comm[topo_dim].rank,T->topo->dim_comm[topo_dim].rank,T->wrld->cdt);
+        if (is_vec[i]){
+          Vector<dtype> * v = new Vector<dtype>(mat_list[i]->lens[0], par_idx[topo_dim], par[par_idx], Idx_Partition(), 0, *T->wrld, *T->sr);
+          if (i != mode)
+            v->operator[]("i") += mat_list[i]->operator[]("i");
+          else{
+            v->operator[]("i") += RHS->operator[]("i");
           }
-          else if (i!=mode) {
-            arrs[i] = (dtype*)T->sr->alloc(tot_sz);
-            mat->read_all(arrs[i], true);
-          } else{
-            if (is_vec)
-              redist_mats[i] = new Vector<dtype>(mat_list[i]->lens[0], 'a'-1, par[par_idx], Idx_Partition(), 0, *T->wrld, *T->sr);
-            else {
-              char nonastr[2];
-              nonastr[0] = 'a'-1;
-              nonastr[1] = 'a'-2;
-              redist_mats[i] = new Matrix<dtype>(nrow, ncol, nonastr, par[par_idx], Idx_Partition(), 0, *T->wrld, *T->sr);
-            }
-            arrs[i] = (dtype*)redist_mats[i]->data;
-            mat->read_all(arrs[i], true);
-          }
+          redist_mats[i] = v;
+          arrs[i] = (dtype*)v->data;
+          if (i != mode)
+            cmdt.bcast(v->data,v->size,T->sr->mdtype(),0);
         } 
         else {
-          int topo_dim = T->edge_map[i].cdt;
-          IASSERT(T->edge_map[i].type == CTF_int::PHYSICAL_MAP);
-          IASSERT(!T->edge_map[i].has_child || T->edge_map[i].child->type != CTF_int::PHYSICAL_MAP);
-          if (aux_mode_first){
-            mat_idx[0] = 'a';
-            mat_idx[1] = par_idx[topo_dim];
-          } else {
-            mat_idx[0] = par_idx[topo_dim];
-            mat_idx[1] = 'a';
-          }
-
-          int comm_lda = 1;
-          for (int l=0; l<topo_dim; l++){
-            comm_lda *= T->topo->dim_comm[l].np;
-          }
-          CTF_int::CommData cmdt(T->wrld->rank-comm_lda*T->topo->dim_comm[topo_dim].rank,T->topo->dim_comm[topo_dim].rank,T->wrld->cdt);
-          if (is_vec){
-            Vector<dtype> * v = new Vector<dtype>(mat_list[i]->lens[0], par_idx[topo_dim], par[par_idx], Idx_Partition(), 0, *T->wrld, *T->sr);
-            if (i != mode)
-              v->operator[]("i") += mat_list[i]->operator[]("i");
-            else{
-              v->operator[]("i") += RHS->operator[]("i");
-            }
-            redist_mats[i] = v;
-            arrs[i] = (dtype*)v->data;
-            if (i != mode)
-              cmdt.bcast(v->data,v->size,T->sr->mdtype(),0);
-          } else {
-            Matrix<dtype> * m = new Matrix<dtype>(nrow, ncol, mat_idx, par[par_idx], Idx_Partition(), 0, *T->wrld, *T->sr);
-            m->operator[]("ij") += mat->operator[]("ij");
-            redist_mats[i] = m;
-            arrs[i] = (dtype*)m->data;
-            if (i != mode)
-              cmdt.bcast(m->data,m->size,T->sr->mdtype(),0);
-            if (aux_mode_first){
-              mat_strides[2*i+0] = kd;
-              mat_strides[2*i+1] = 1;
-            } else {
-              mat_strides[2*i+0] = 1;
-              mat_strides[2*i+1] = m->pad_edge_len[0]/phys_phase[i];
-            }
-          }
+          Matrix<dtype> * m = new Matrix<dtype>(nrow[i], ncol[i], mat_idx, par[par_idx], Idx_Partition(), 0, *T->wrld, *T->sr);
+          m->operator[]("ij") += mat->operator[]("ij");
+          redist_mats[i] = m;
+          arrs[i] = (dtype*)m->data;
+          if (i != mode)
+            cmdt.bcast(m->data,m->size,T->sr->mdtype(),0);
         }
       }
-      //CTF::Tensor< dtype >::Tensor  ( tensor const &  A = core, World &   wrld = current rank )
-      World local_world = CTF::World::World(MPI_COMM_SELF);
-      int total_size ; 
-      MPI_Comm_size(MPI_COMM_WORLD, &total_size);
-      Partition Partition1D(1, &total_size);
+    }
+    //CTF::Tensor< dtype >::Tensor  ( tensor const &  A = core, World &   wrld = current rank )
+    World local_world = CTF::World::World(MPI_COMM_SELF);
+    int total_size ;
+    int rank ; 
+    MPI_Comm_size(MPI_COMM_WORLD, &total_size);
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    Partition Partition1D(1, &total_size);
 
 
-      char nonastr_core[core->order];
-      for(int i = 0 ; i < core->order ; i++){
-        nonastr_core[i] = 'a' - i-1 ;
+    char nonastr_core[core->order];
+    for(int i = 0 ; i < core->order ; i++){
+      nonastr_core[i] = 'i'+i+1 ;
+    }
+    //char par_idx_core;
+    //par_idx_core = 'i';
+
+    char * core_name1 = "lcore";
+
+    //B = new Tensor <dtype>(..., Partition1D["i"], Idx_Partition(), World(MPI_COMM_WORLD))
+
+    Tensor<dtype>* l_core1 = new Tensor<dtype>(core->order,
+                                        core->lens,
+                                        core->sym,
+                                        *T->wrld,
+                                        nonastr_core,
+                                        Partition1D["i"],
+                                        Idx_Partition(),
+                                        core_name1,
+                                        0,
+                                        *core->sr
+                                        );
+        
+    l_core1->operator[]("jkl") = core->operator[]("jkl");
+
+    int len_core=1;
+    for(int i =0; i <l_core1->order ; i++){
+        len_core = len_core*l_core1->lens[i];
+    }
+
+    MPI_Bcast((dtype*)l_core1->data,len_core, MPI_DOUBLE,0, MPI_COMM_WORLD);
+
+    char * core_name = "core";
+
+    Tensor<dtype>* l_core = new Tensor<dtype>(core->order,
+                                        core->lens,
+                                        local_world,
+                                        *core->sr,
+                                        core_name,
+                                        0
+                                        );
+    memcpy((dtype*)l_core->data,(dtype *)l_core1->data,len_core*sizeof(dtype));
+    
+    delete l_core1;
+
+
+    t_solve_remap.stop();
+
+    int jr = T->edge_map[mode].calc_phys_rank(T->topo);
+    MPI_Comm slice_comm;
+    MPI_Comm_split(T->wrld->comm, jr, T->wrld->rank, &slice_comm);
+    int cm_rank,cm_size;
+    MPI_Comm_rank(slice_comm, &cm_rank);
+    MPI_Comm_size(slice_comm,&cm_size);
+    
+    int64_t I = T->pad_edge_len[mode]/T->edge_map[mode].np ;
+    int R = l_core->lens[mode];
+    
+    
+    Timer t_trav("Sort_nnz");
+    Timer t_LHS_work("LHS_work");
+    Timer t_solve_lhs("LHS_solves");
+    t_trav.start() ; 
+
+    /*
+    std::sort(pairs,pairs+ npair,[T,phys_phase,mode,ldas](Pair<dtype> i1, Pair<dtype> i2){
+      return (((i1.k/ldas[mode])%T->lens[mode])/phys_phase[mode] < ((i2.k/ldas[mode])%T->lens[mode])/phys_phase[mode] ) ; 
+    }) ;
+    */
+    
+
+    Pair<dtype> * pairs_copy = (Pair<dtype>*)malloc(npair*2*sizeof(int64_t)) ;
+    int * indices = (int *)malloc(npair*sizeof(int64_t)) ;
+    int64_t * c = (int64_t *) calloc(I+1,sizeof(int64_t));
+    int64_t * count = (int64_t *) calloc(I,sizeof(int64_t));
+
+    
+    for (int64_t i=0; i<npair ; i++){
+      int64_t key = pairs[i].k/ldas[mode] ; 
+      indices[i] = (key%T->lens[mode])/phys_phase[mode];
+      ++c[indices[i]];
+      ++count[indices[i]] ; 
+    }
+
+    for(int64_t i=1;i<=I;i++){
+      c[i]+=c[i-1];            
+    }
+
+    for(int64_t i=npair-1;i>=0;i--){
+      pairs_copy[c[indices[i]]-1]=pairs[i];        
+      --c[indices[i]] ;       
+    } 
+
+    std::copy(pairs_copy, pairs_copy+npair,pairs)  ;
+
+    free(c);
+    free(pairs_copy);
+    free(indices);
+    
+    t_trav.stop();
+    
+    //int64_t I_s = std::ceil(float(I)/cm_size) ;
+    int batches = 1 ;
+    int64_t batched_I = I ; 
+    int64_t max_memuse = CTF_int::proc_bytes_available() ;
+    int64_t I_s ;
+    int64_t rows ;
+    int buffer = 2048*5;
+    char * vec_name = "vec";
+    Tensor<dtype> ** vecs = (Tensor<dtype>**)malloc(sizeof(Tensor <dtype> *)*(T->order));
+    dtype ** vec_data = (dtype**)malloc(sizeof(dtype*)*T->order);
+    for(int i = 0 ; i < T->order ; i++){
+        vecs[i] = new Vector <dtype>(l_core->lens[i], local_world,vec_name,0, *T->sr);
+        vec_data[i] = (dtype*)vecs[i]->data;
+        /*
+        CTF::Vector< dtype >::Vector  ( int   len,
+        World &   world,
+        CTF_int::algstrct const &   sr)
+        */ 
+    }
+
+    while (true){
+      if (max_memuse > ((std::ceil(float(I/batches)/cm_size)*cm_size*(R+3)*R) + buffer*R  )*(int64_t)sizeof(dtype) *(int64_t)sizeof(dtype) ) {
+        break ;
       }
-      char par_idx_core;
-      par_idx_core = 'a';
-
-
-      //B = new Tensor <dtype>(..., Partition1D["i"], Idx_Partition(), World(MPI_COMM_WORLD))
-
-      Tensor<dtype>* l_core1 = new Tensor<dtype>(core->order,
-                                          core->lens,
-                                          core->sym,
-                                          *T->wrld,
-                                          nonastr_core,
-                                          Partition1D[&par_idx_core],
-                                          Idx_Partition(),
-                                          NULL,
-                                          0,
-                                          *core->sr
-                                          );
-
-      l_core1->operator[]("ijk") = core->operator[]("ijk");
-      int len_core=1;
-      for(int i =0; i <l_core1->order ; i++){
-          len_core = len_core*l_core1->lens[i];
+      else{
+        batches +=1 ;  
       }
-      
+    }
+    MPI_Allreduce(MPI_IN_PLACE, &batches, 1, MPI_INT, MPI_MAX, T->wrld->comm);
+    batched_I = I/batches ; 
 
-      MPI_Bcast((dtype*)l_core1->data,len_core, MPI_DOUBLE,0, MPI_COMM_WORLD);
-
-
-
-      Tensor<dtype>* l_core = new Tensor<dtype>(core->order,
-                                          core->lens,
-                                          core->sym,
-                                          local_world,
-                                          nonastr_core,
-                                          Partition1D[&par_idx_core],
-                                          Idx_Partition(),
-                                          NULL,
-                                          0,
-                                          *core->sr
-                                          );
-      memcpy((dtype*)l_core->data,(dtype *)l_core1->data,len_core*sizeof(dtype));
-      
-
-
-      delete l_core1;
-      t_solve_remap.stop();
-
-      int jr = T->edge_map[mode].calc_phys_rank(T->topo);
-      MPI_Comm slice_comm;
-      MPI_Comm_split(T->wrld->comm, jr, T->wrld->rank, &slice_comm);
-      int cm_rank,cm_size;
-      MPI_Comm_rank(slice_comm, &cm_rank);
-      MPI_Comm_size(slice_comm,&cm_size);
-      
-      int64_t I = T->pad_edge_len[mode]/T->edge_map[mode].np ;
-      int R = l_core->lens[mode];
-      
-      
-      Timer t_trav("Sort_nnz");
-      Timer t_LHS_work("LHS_work");
-      Timer t_solve_lhs("LHS_solves");
-      t_trav.start() ; 
-
-      /*
-      std::sort(pairs,pairs+ npair,[T,phys_phase,mode,ldas](Pair<dtype> i1, Pair<dtype> i2){
-        return (((i1.k/ldas[mode])%T->lens[mode])/phys_phase[mode] < ((i2.k/ldas[mode])%T->lens[mode])/phys_phase[mode] ) ; 
-      }) ;
-      */
-      
-
-      Pair<dtype> * pairs_copy = (Pair<dtype>*)malloc(npair*2*sizeof(int64_t)) ;
-      int * indices = (int *)malloc(npair*sizeof(int64_t)) ;
-      int64_t * c = (int64_t *) calloc(I+1,sizeof(int64_t));
-      int64_t * count = (int64_t *) calloc(I,sizeof(int64_t));
-
-      
-      for (int64_t i=0; i<npair ; i++){
-        int64_t key = pairs[i].k/ldas[mode] ; 
-        indices[i] = (key%T->lens[mode])/phys_phase[mode];
-        ++c[indices[i]];
-        ++count[indices[i]] ; 
-      }
-
-      for(int64_t i=1;i<=I;i++){
-        c[i]+=c[i-1];            
-      }
-
-      for(int64_t i=npair-1;i>=0;i--){
-        pairs_copy[c[indices[i]]-1]=pairs[i];        
-        --c[indices[i]] ;       
+    int64_t total= 0;
+    for (int b =0 ; b<batches ; b++){
+      if (b != batches-1){
+        rows = batched_I; 
       } 
-
-      std::copy(pairs_copy, pairs_copy+npair,pairs)  ;
-
-      free(c);
-      free(pairs_copy);
-      free(indices);
-      
-      t_trav.stop();
-      
-      //int64_t I_s = std::ceil(float(I)/cm_size) ;
-      int batches = 1 ;
-      int64_t batched_I = I ; 
-      int64_t max_memuse = CTF_int::proc_bytes_available() ;
-      int64_t I_s ;
-      int64_t rows ;
-      int buffer = 2048*5; 
-
-      while (true){
-        if (max_memuse > ((std::ceil(float(I/batches)/cm_size)*cm_size*(R+1)*R) + buffer*R + 10 )*(int64_t)sizeof(dtype) *(int64_t)sizeof(dtype) ) {
-          break ;
-        }
-        else{
-          batches +=1 ;  
-        }
+      else{
+        rows = batched_I + I%batches ;
       }
-      MPI_Allreduce(MPI_IN_PLACE, &batches, 1, MPI_INT, MPI_MAX, T->wrld->comm);
-      batched_I = I/batches ; 
 
-      int64_t total= 0;
-      for (int b =0 ; b<batches ; b++){
-        if (b != batches-1){
-          rows = batched_I; 
-        } 
-        else{
-          rows = batched_I + I%batches ;
-        }
+      I_s = std::ceil(float(rows)/cm_size) ;
 
-        I_s = std::ceil(float(rows)/cm_size) ;
+      dtype * LHS_list = (dtype *) calloc(I_s*cm_size*R*R,sizeof(dtype) );
+      if (LHS_list == 0){
+        printf("Memory full LHS for proc [%d] \n",T->wrld->rank);
+      }
+      
+      //define how the symmetric arrays are referenced, keep this consistent throughout
+      char* uplo = "L" ;
+      char* trans = "N" ; //if want to incorporate column major then change this 
+      int scale = 1 ;
+      double alpha = 1.0 ; 
+      int info =0 ; 
+      
+      
+      t_LHS_work.start();
+      Timer t_scatter("Scatter and Sc_reduce");
 
-        dtype * LHS_list = (dtype *) calloc(I_s*cm_size*R*R,sizeof(dtype) );
-        if (LHS_list == 0){
-          printf("Memory full LHS for proc [%d] \n",T->wrld->rank);
-        }
-        
-        //define how the symmetric arrays are referenced, keep this consistent throughout
-        char* uplo = "L" ;
-        char* trans = "N" ; //if want to incorporate column major then change this 
-        int scale = 1 ;
-        double alpha = 1.0 ; 
-        int info =0 ; 
+      int sweeps ;
+      
+      //int * inds = (int*)malloc(T->order*sizeof(int));
+      dtype * H = (dtype *) calloc(buffer*R,sizeof(dtype) ) ; 
 
-        
-        
-        t_LHS_work.start();
-        Timer t_scatter("Scatter and Sc_reduce");
+    // use csf format to iterate over the tensor
+    // csf format is a list of indices for each mode
+    // the indices are ordered by the mode they are in
+    // csf format increases efficiency of iterating over tensor
+    // by reducing the number of times the tensor is accessed
 
-        int sweeps ;
-
-        dtype * H = (dtype *) calloc(buffer*R,sizeof(dtype) ) ;
-        //int * inds = (int*)malloc(T->order*sizeof(int));
-        Tensor<dtype> ** vecs = (Tensor<dtype>**)malloc(sizeof(Tensor <dtype> *)*(T->order));
-        dtype ** vec_data = (dtype**)malloc(sizeof(dtype*)*T->order);
-        for(int i = 0 ; i < T->order ; i++){
-            vecs[i] = new Vector <dtype>(mat_list[i]->lens[1-aux_mode_first], local_world, *T->sr);
-            vec_data[i] = (dtype*)vecs[i]->data;
-            /*
-            CTF::Vector< dtype >::Vector  ( int   len,
-            World &   world,
-            CTF_int::algstrct const &   sr)
-            */ 
-        }
-
-        for (int64_t j =0  ; j< rows ; j++){ 
-          sweeps = count[j+ b*batched_I]/buffer ;
-          if (sweeps >0){
-            for (int s = 0 ; s< sweeps ; s++){
-              for(int q = 0 ; q<buffer ; q++){
-                int64_t key = pairs[total + q].k ;
-                //std::fill(
-                //H + q*R,
-                //H + (q+1)*R ,
-                //std ::sqrt(pairs[total + q].d)) ;
-                for(int i = 0 ; i < T->order ; i++){
-                  if (i!=mode){
-                    int64_t ke= key/ldas[i];
-                    int index = (ke%T->lens[i])/phys_phase[i];
-                    //CTF_int::default_vec_mul(&arrs[i][index*R], H+q*R, H+q*R, R) ;
-                    std::copy(&arrs[i][index*l_core->lens[i]], &arrs[i][(index+1)*l_core->lens[i]], vec_data[i]) ;
-                  }
-                }
-                
-                if (mode ==0){
-                  vecs[0]->operator[]("i") = l_core->operator[]("ijk")*vecs[1]->operator[]("j")*vecs[2]->operator[]("k");
-                  //store result in the space between H+q*R to H+ (q+1)*R
-                }
-                else if (mode ==1){
-                  vecs[1]->operator[]("j") = l_core->operator[]("ijk")*vecs[0]->operator[]("i")*vecs[2]->operator[]("k");
-                }
-                else{
-                  vecs[2]->operator[]("k") = l_core->operator[]("ijk")*vecs[0]->operator[]("i")*vecs[1]->operator[]("j");
-                }
-                std::copy(vec_data[mode], vec_data[mode]+ R, H +q*R ) ;
-              }
-              CTF_BLAS::syrk<dtype>(uplo,trans,&R,&buffer,&alpha,H,&R,&alpha,&LHS_list[j*R*R],&R) ;
-              std::fill(
-                  H,
-                  H+ buffer*R,
-                  0.);
-              total+=buffer ; 
-            }
-          }
-          sweeps = count[j+ b*batched_I]%buffer ;
-          if (sweeps>0){
-            for(int q = 0 ; q<sweeps ; q++){
+      for (int64_t j =0  ; j< rows ; j++){ 
+        sweeps = count[j+ b*batched_I]/buffer ;
+        if (sweeps >0){
+          for (int s = 0 ; s< sweeps ; s++){
+            for(int q = 0 ; q<buffer ; q++){
               int64_t key = pairs[total + q].k ;
               //std::fill(
               //H + q*R,
@@ -1665,214 +1623,180 @@ template<typename dtype>
                   int64_t ke= key/ldas[i];
                   int index = (ke%T->lens[i])/phys_phase[i];
                   //CTF_int::default_vec_mul(&arrs[i][index*R], H+q*R, H+q*R, R) ;
-                  std::copy(&arrs[i][index*l_core->lens[i]], &arrs[i][(index+1)*l_core->lens[i]], vec_data[i]) ; 
+                  std::copy(&arrs[i][index*l_core->lens[i]], &arrs[i][(index+1)*l_core->lens[i]], vec_data[i]) ;
                 }
               }
-              
+
               if (mode ==0){
-                  vecs[0]->operator[]("i") = l_core->operator[]("ijk")*vecs[1]->operator[]("j")*vecs[2]->operator[]("k");
-                  //store result in the space between H+q*R to H+ (q+1)*R
+                /*CTF::Idx_Tensor idt(l_core->operator[]("ijk"));
+                CTF_int::Contract_Term ct(idt,vecs[0]->operator[]("i"));
+                for (int i=1: i<l_core->order; i++){
+                  CTF_int::Contract_Term ct(ct,vecs[i]->operator[]("j"));
                 }
-                else if (mode ==1){
-                  vecs[1]->operator[]("j") = l_core->operator[]("ijk")*vecs[0]->operator[]("i")*vecs[2]->operator[]("k");
-                }
-                else{
-                  vecs[2]->operator[]("k") = l_core->operator[]("ijk")*vecs[0]->operator[]("i")*vecs[1]->operator[]("j");
-                }
-                std::copy(vec_data[mode], vec_data[mode]+ R, H +q*R ) ;
+                *vecs[2]->operator[]("k");
+                */
+
+                vecs[0]->operator[]("i") = l_core->operator[]("ijk")*vecs[1]->operator[]("j")*vecs[2]->operator[]("k");
+                //store result in the space between H+q*R to H+ (q+1)*R
+              }
+              else if (mode ==1){
+                vecs[1]->operator[]("j") = l_core->operator[]("ijk")*vecs[0]->operator[]("i")*vecs[2]->operator[]("k");
+              }
+              else{
+                vecs[2]->operator[]("k") = l_core->operator[]("ijk")*vecs[0]->operator[]("i")*vecs[1]->operator[]("j");
+              }
+              std::copy(vec_data[mode], vec_data[mode]+ R, H +q*R ) ;
             }
-            CTF_BLAS::syrk<dtype>(uplo,trans,&R,&sweeps,&alpha,H,&R,&alpha,&LHS_list[j*R*R],&R) ;
+            CTF_BLAS::syrk<dtype>(uplo,trans,&R,&buffer,&alpha,H,&R,&alpha,&LHS_list[j*R*R],&R) ;
             std::fill(
                 H,
-                H+ sweeps*R,
+                H+ buffer*R,
                 0.);
-            total+=sweeps ; 
-          } 
-        }
-
-        free(H) ;
-        for(int i = 0 ; i < T->order ; i++){
-            delete vecs[i]; 
-        }
-        //free(l_core_data);
-        delete l_core;
-        free(vecs);
-        free(vec_data);
-
-
-        /*
-        int sweeps ; 
-          
-        //double * row = (double *) malloc(R* sizeof(double) );
-        dtype * H = (dtype *) calloc(buffer*R,sizeof(dtype) ) ;
-        
-        
-        
-        // create local ctf vectors for now (matrices later)
-
-        for (int64_t j =0  ; j< rows ; j++){ 
-          sweeps = count[j+ b*batched_I]/buffer ;
-
-          if (sweeps >0){
-            for (int s = 0 ; s< sweeps ; s++){
-#ifdef _OPENMP
-              #pragma omp parallel for 
-#endif
-              for(int q = 0 ; q<buffer ; q++){
-                int64_t key = pairs[total + q].k ;
-                std::fill(
-                H + q*R,
-                H + (q+1)*R ,
-                std ::sqrt(pairs[total + q].d)) ;
-                for(int i = 0 ; i < T->order ; i++){
-                  if (i!=mode){
-                    int64_t ke= key/ldas[i];
-                    int index = (ke%T->lens[i])/phys_phase[i];
-                    
-                    //CTF_int::default_vec_mul(&arrs[i][index*R], H+q*R, H+q*R, R) ;
-                    // tensor contraction with core and other factor rows.
-
-                    
-                  }
-                }
-              }
-              CTF_BLAS::syrk<dtype>(uplo,trans,&R,&buffer,&alpha,H,&R,&alpha,&LHS_list[j*R*R],&R) ;
-              std::fill(
-                  H,
-                  H+ buffer*R,
-                  0.);
-              total+=buffer ; 
-            }
-          }
-          sweeps = count[j+ b*batched_I]%buffer ;
-          if (sweeps>0){
-#ifdef _OPENMP
-            #pragma omp parallel for
-#endif
-            for(int q = 0 ; q<sweeps ; q++){
-              int64_t key = pairs[total + q].k ;
-              std::fill(
-              H + q*R,
-              H + (q+1)*R ,
-              std ::sqrt(pairs[total + q].d)) ;
-              for(int i = 0 ; i < T->order ; i++){
-                if (i!=mode){
-                  int64_t ke= key/ldas[i];
-                  int index = (ke%T->lens[i])/phys_phase[i];
-                  CTF_int::default_vec_mul(&arrs[i][index*R], H+q*R, H+q*R, R) ;
-                }
-              }
-            }
-            CTF_BLAS::syrk<dtype>(uplo,trans,&R,&sweeps,&alpha,H,&R,&alpha,&LHS_list[j*R*R],&R) ;
-            std::fill(
-                H,
-                H+ sweeps*R,
-                0.);
-            total+=sweeps ; 
-          } 
-        }
-
-        
-        free(H) ;
-        //free(inds) ;
-
-        */
-        
-        t_LHS_work.stop();
-
-        //scatter reduce left hand sides and scatter right hand sides in a buffer
-        int* Recv_count = (int*) malloc(sizeof(int)*cm_size) ; 
-        std::fill(
-         Recv_count,
-         Recv_count + cm_size,
-         I_s*R*R);
-
-        
-        t_scatter.start() ; 
-        MPI_Reduce_scatter( MPI_IN_PLACE, LHS_list, Recv_count , MPI_DOUBLE, MPI_SUM, slice_comm );
-        free(Recv_count);
-
-
-
-        for(int64_t i =0 ; i< I_s ; i++){
-          for(int r = 0 ; r<R ; r++){
-            LHS_list[R*R*i +r*R +r]+=regu ; 
+            total+=buffer ;
           }
         }
-        
-        
-        
-
-        dtype * arrs_buf = (dtype *) calloc(I_s*cm_size*R,sizeof(dtype) );
-
-        if (b == batches-1){
-          std::copy(&arrs[mode][b*batched_I*R],&arrs[mode][I*R],arrs_buf) ;
-        }
-        else{
-          std::copy(&arrs[mode][b*batched_I*R],&arrs[mode][(b+1)*batched_I*R],arrs_buf) ; 
-        }
-          
-        if (cm_rank == 0){
-          MPI_Scatter(arrs_buf, I_s*R, MPI_DOUBLE, MPI_IN_PLACE, I_s*R,  
-                     MPI_DOUBLE, 0, slice_comm);
-        }
-        else{
-          MPI_Scatter(NULL, I_s*R, MPI_DOUBLE, arrs_buf, I_s*R,  
-                     MPI_DOUBLE, 0, slice_comm);
-        }
-        t_scatter.stop() ; 
-        //call local spd solve on I/cm_size different systems locally (avoid calling solve on padding in lhs)
-        t_solve_lhs.start() ;
-        for (int i=0; i<I_s; i++){
-          if (i + cm_rank*I_s + b*batched_I < I - (T->lens[mode] % T->edge_map[mode].np > 0 )  + (jr< T->lens[mode] % T->edge_map[mode].np ))
-            CTF_BLAS::posv<dtype>(uplo,&R,&scale,&LHS_list[i*R*R],&R,&arrs_buf[i*R],&R,&info) ;
-        }
-        t_solve_lhs.stop();
-
-        free(LHS_list) ;
-
-        //allgather on slice_comm should be used for preserving the mttkrp like mapping
-        if (cm_rank==0){
-          MPI_Gather(MPI_IN_PLACE, I_s*R, MPI_DOUBLE, arrs_buf, I_s*R, MPI_DOUBLE, 0, slice_comm);
-        }
-        else{
-          MPI_Gather(arrs_buf, I_s*R, MPI_DOUBLE, NULL, I_s*R, MPI_DOUBLE, 0, slice_comm);
-        }
-        
-        std::copy(arrs_buf, arrs_buf + rows*R, &arrs[mode][b*batched_I*R]) ; 
-        
-        free(arrs_buf) ;
+        sweeps = count[j+ b*batched_I]%buffer ;
+        if (sweeps>0){
+          for(int q = 0 ; q<sweeps ; q++){
+            int64_t key = pairs[total + q].k ;
+            //std::fill(
+            //H + q*R,
+            //H + (q+1)*R ,
+            //std ::sqrt(pairs[total + q].d)) ;
+            for(int i = 0 ; i < T->order ; i++){
+              if (i!=mode){
+                int64_t ke= key/ldas[i];
+                int index = (ke%T->lens[i])/phys_phase[i];
+                //CTF_int::default_vec_mul(&arrs[i][index*R], H+q*R, H+q*R, R) ;
+                std::copy(&arrs[i][index*l_core->lens[i]], &arrs[i][(index+1)*l_core->lens[i]], vec_data[i]) ; 
+              }
+            }
+            
+            if (mode ==0){
+                vecs[0]->operator[]("i") = l_core->operator[]("ijk")*vecs[1]->operator[]("j")*vecs[2]->operator[]("k");
+                //store result in the space between H+q*R to H+ (q+1)*R
+              }
+              else if (mode ==1){
+                vecs[1]->operator[]("j") = l_core->operator[]("ijk")*vecs[0]->operator[]("i")*vecs[2]->operator[]("k");
+              }
+              else{
+                vecs[2]->operator[]("k") = l_core->operator[]("ijk")*vecs[0]->operator[]("i")*vecs[1]->operator[]("j");
+              }
+              std::copy(vec_data[mode], vec_data[mode]+ R, H +q*R ) ;
+          }
+          CTF_BLAS::syrk<dtype>(uplo,trans,&R,&sweeps,&alpha,H,&R,&alpha,&LHS_list[j*R*R],&R) ;
+          std::fill(
+              H,
+              H+ sweeps*R,
+              0.);
+          total+=sweeps ; 
+        } 
       }
 
-      free(count) ;
+      free(H) ;
 
-      MPI_Comm_free(&slice_comm);
+      
+      t_LHS_work.stop();
 
-      for (int j=0 ; j< T->order ; j++){
-        if (j==mode){
-          if (redist_mats[j] != NULL){
-            mat_list[j]->set_zero();
-            mat_list[j]->operator[]("ij") += redist_mats[j]->operator[]("ij");
-            delete redist_mats[j];
-          }
-          else {
-            IASSERT((dtype*)mat_list[j]->data == arrs[j]);
-          }
+      //scatter reduce left hand sides and scatter right hand sides in a buffer
+      int* Recv_count = (int*) malloc(sizeof(int)*cm_size) ; 
+      std::fill(
+       Recv_count,
+       Recv_count + cm_size,
+       I_s*R*R);
+
+      
+      t_scatter.start() ; 
+      MPI_Reduce_scatter( MPI_IN_PLACE, LHS_list, Recv_count , MPI_DOUBLE, MPI_SUM, slice_comm );
+      free(Recv_count);
+
+
+
+      for(int64_t i =0 ; i< I_s ; i++){
+        for(int r = 0 ; r<R ; r++){
+          LHS_list[R*R*i +r*R +r]+=regu ; 
+        }
+      }
+      
+      
+      
+
+      dtype * arrs_buf = (dtype *) calloc(I_s*cm_size*R,sizeof(dtype) );
+
+      if (b == batches-1){
+        std::copy(&arrs[mode][b*batched_I*R],&arrs[mode][I*R],arrs_buf) ;
+      }
+      else{
+        std::copy(&arrs[mode][b*batched_I*R],&arrs[mode][(b+1)*batched_I*R],arrs_buf) ; 
+      }
+        
+      if (cm_rank == 0){
+        MPI_Scatter(arrs_buf, I_s*R, MPI_DOUBLE, MPI_IN_PLACE, I_s*R,  
+                   MPI_DOUBLE, 0, slice_comm);
+      }
+      else{
+        MPI_Scatter(NULL, I_s*R, MPI_DOUBLE, arrs_buf, I_s*R,  
+                   MPI_DOUBLE, 0, slice_comm);
+      }
+      t_scatter.stop() ; 
+      //call local spd solve on I/cm_size different systems locally (avoid calling solve on padding in lhs)
+      t_solve_lhs.start() ;
+      for (int i=0; i<I_s; i++){
+        if (i + cm_rank*I_s + b*batched_I < I - (T->lens[mode] % T->edge_map[mode].np > 0 )  + (jr< T->lens[mode] % T->edge_map[mode].np ))
+          CTF_BLAS::posv<dtype>(uplo,&R,&scale,&LHS_list[i*R*R],&R,&arrs_buf[i*R],&R,&info) ;
+      }
+      t_solve_lhs.stop();
+
+      free(LHS_list) ;
+
+      //allgather on slice_comm should be used for preserving the mttkrp like mapping
+      if (cm_rank==0){
+        MPI_Gather(MPI_IN_PLACE, I_s*R, MPI_DOUBLE, arrs_buf, I_s*R, MPI_DOUBLE, 0, slice_comm);
+      }
+      else{
+        MPI_Gather(arrs_buf, I_s*R, MPI_DOUBLE, NULL, I_s*R, MPI_DOUBLE, 0, slice_comm);
+      }
+      
+      std::copy(arrs_buf, arrs_buf + rows*R, &arrs[mode][b*batched_I*R]) ; 
+      
+      free(arrs_buf) ;
+    }
+
+    for(int i = 0 ; i < T->order ; i++){
+      delete vecs[i]; 
+    }
+    delete l_core;
+    free(vec_data);
+    free(vecs);
+
+    free(count) ;
+
+    MPI_Comm_free(&slice_comm);
+
+    for (int j=0 ; j< T->order ; j++){
+      if (j==mode){
+        if (redist_mats[j] != NULL){
+          mat_list[j]->set_zero();
+          mat_list[j]->operator[]("ij") += redist_mats[j]->operator[]("ij");
+          delete redist_mats[j];
         }
         else {
-          if (redist_mats[j] != NULL){
-            if (redist_mats[j]->data != (char*)arrs[j])
-              T->sr->dealloc((char*)arrs[j]);
-            delete redist_mats[j];
-          } else {
-            if (arrs[j] != (dtype*)mat_list[j]->data)
-              T->sr->dealloc((char*)arrs[j]);
-          }
+          IASSERT((dtype*)mat_list[j]->data == arrs[j]);
+        }
+      }
+      else {
+        if (redist_mats[j] != NULL){
+          if (redist_mats[j]->data != (char*)arrs[j])
+            T->sr->dealloc((char*)arrs[j]);
+          delete redist_mats[j];
+        } else {
+          if (arrs[j] != (dtype*)mat_list[j]->data)
+            T->sr->dealloc((char*)arrs[j]);
         }
       }
     }
+
     free(redist_mats);
-    if (mat_strides != NULL) free(mat_strides);
     free(par_idx);
     free(phys_phase);
     free(ldas);
@@ -1882,4 +1806,755 @@ template<typename dtype>
     t_solve_factor.stop();
   }
   
+  template<typename dtype>
+  void MTTKRP_Tucker(Tensor<dtype> * T, Tensor<dtype> ** mat_list,Tensor<dtype> * core,  int mode, bool aux_mode_first){
+    Timer t_mttkrp("MTTKRP_Tucker");
+    t_mttkrp.start();
+    int k[T->order] ;
+    for (int i =0 ; i< T->order; i++)
+      k[i] = -1;
+    bool is_vec[T->order];
+    for (int i =0 ; i< T->order ; i++)
+      is_vec[i] = mat_list[i]->order == 1;
+    for (int i =0 ; i< T->order ; i++){
+      if (!is_vec[i]){
+        k[i] = mat_list[i]->lens[1-aux_mode_first];
+      }
+    }
+    IASSERT(mode >= 0 && mode < T->order);
+    for (int i=0; i<T->order; i++){
+      IASSERT(is_vec[i] || T->lens[i] == mat_list[i]->lens[aux_mode_first]);
+      IASSERT(!mat_list[i]->is_sparse);
+    }
+    dtype ** arrs = (dtype**)malloc(sizeof(dtype*)*T->order);
+    int64_t * ldas = (int64_t*)malloc(T->order*sizeof(int64_t));
+    int * phys_phase = (int*)malloc(T->order*sizeof(int));
+    int * mat_strides = NULL;
+    for (int i=0; i<T->order; i++){
+      phys_phase[i] = T->edge_map[i].calc_phys_phase();
+    }
+
+    int64_t npair;
+    Pair<dtype> * pairs;
+    if (T->is_sparse){
+      pairs = (Pair<dtype>*)T->data;
+      npair = T->nnz_loc;
+    } else
+      T->get_local_pairs(&npair, &pairs, true, false);
+
+    ldas[0] = 1;
+    for (int i=1; i<T->order; i++){
+      ldas[i] = ldas[i-1] * T->lens[i-1];
+    }
+
+    Tensor<dtype> ** redist_mats = (Tensor<dtype>**)malloc(sizeof(Tensor<dtype>*)*T->order); 
+
+    Partition par(T->topo->order, T->topo->lens);
+    char * par_idx = (char*)malloc(sizeof(char)*T->topo->order);
+    for (int i=0; i<T->topo->order; i++){
+      par_idx[i] = 'a'+i+1;
+    }
+    char mat_idx[2];
+    Timer t_mttkrp_remap("MTTKRP_remap_mats");
+    t_mttkrp_remap.start();
+    int nrow[T->order], ncol[T->order] ; 
+    for (int i=0; i<T->order; i++){
+      Tensor<dtype> * mat = mat_list[i];
+
+      int64_t tot_sz;
+      if (is_vec[i])
+        tot_sz = T->lens[i];
+      else
+        tot_sz = T->lens[i]*k[i];
+      if (aux_mode_first){
+        nrow[i] = k[i];
+        ncol[i] = T->lens[i];
+      } else {
+        nrow[i] = T->lens[i];
+        ncol[i] = k[i];
+      }
+      if (phys_phase[i] == 1){
+        redist_mats[i] = NULL;
+        if (T->wrld->np == 1){
+          arrs[i] = (dtype*)mat_list[i]->data;
+          if (i == mode)
+            std::fill(arrs[i], arrs[i]+mat_list[i]->size, *((dtype*)T->sr->addid()));
+        } else if (i != mode){
+          arrs[i] = (dtype*)T->sr->alloc(tot_sz);
+          mat->read_all(arrs[i], true);
+        } else {
+          if (is_vec[i])
+            redist_mats[i] = new Vector<dtype>(mat_list[i]->lens[0], 'a'-1, par[par_idx], Idx_Partition(), 0, *T->wrld, *T->sr);
+          else {
+            char nonastr[2];
+            nonastr[0] = 'a'-1;
+            nonastr[1] = 'a'-2;
+            redist_mats[i] = new Matrix<dtype>(nrow[i], ncol[i], nonastr, par[par_idx], Idx_Partition(), 0, *T->wrld, *T->sr);
+          }
+          arrs[i] = (dtype*)redist_mats[i]->data;
+        }
+      } else {
+        int topo_dim = T->edge_map[i].cdt;
+        IASSERT(T->edge_map[i].type == CTF_int::PHYSICAL_MAP);
+        IASSERT(!T->edge_map[i].has_child || T->edge_map[i].child->type != CTF_int::PHYSICAL_MAP);
+        if (aux_mode_first){
+          mat_idx[0] = 'a';
+          mat_idx[1] = par_idx[topo_dim];
+        } else {
+          mat_idx[0] = par_idx[topo_dim];
+          mat_idx[1] = 'a';
+        }
+
+        int comm_lda = 1;
+        for (int l=0; l<topo_dim; l++){
+          comm_lda *= T->topo->dim_comm[l].np;
+        }
+        CTF_int::CommData cmdt(T->wrld->rank-comm_lda*T->topo->dim_comm[topo_dim].rank,T->topo->dim_comm[topo_dim].rank,T->wrld->cdt);
+        if (is_vec[i]){
+          Vector<dtype> * v = new Vector<dtype>(mat_list[i]->lens[0], par_idx[topo_dim], par[par_idx], Idx_Partition(), 0, *T->wrld, *T->sr);
+          if (i != mode)
+            v->operator[]("i") += mat_list[i]->operator[]("i");
+          redist_mats[i] = v;
+          arrs[i] = (dtype*)v->data;
+          if (i != mode)
+            cmdt.bcast(v->data,v->size,T->sr->mdtype(),0);
+        } else {
+          Matrix<dtype> * m = new Matrix<dtype>(nrow[i], ncol[i], mat_idx, par[par_idx], Idx_Partition(), 0, *T->wrld, *T->sr);
+          if (i != mode)
+            m->operator[]("ij") += mat->operator[]("ij");
+          redist_mats[i] = m;
+          arrs[i] = (dtype*)m->data;
+          if (i != mode)
+            cmdt.bcast(m->data,m->size,T->sr->mdtype(),0);
+        }
+      }
+    }
+
+    World local_world = CTF::World::World(MPI_COMM_SELF);
+    int total_size ; 
+    MPI_Comm_size(MPI_COMM_WORLD, &total_size);
+    Partition Partition1D(1, &total_size);
+
+
+    char nonastr_core[core->order];
+    for(int i = 0 ; i < core->order ; i++){
+      nonastr_core[i] = 'a' - i-1 ;
+    }
+    char par_idx_core;
+    par_idx_core = 'a';
+
+
+    //B = new Tensor <dtype>(..., Partition1D["i"], Idx_Partition(), World(MPI_COMM_WORLD))
+
+    Tensor<dtype>* l_core1 = new Tensor<dtype>(core->order,
+                                        core->lens,
+                                        core->sym,
+                                        *T->wrld,
+                                        nonastr_core,
+                                        Partition1D[&par_idx_core],
+                                        Idx_Partition(),
+                                        NULL,
+                                        0,
+                                        *core->sr
+                                        );
+
+    l_core1->operator[]("ijk") += core->operator[]("ijk");
+    int len_core=1;
+    for(int i =0; i <l_core1->order ; i++){
+        len_core = len_core*l_core1->lens[i];
+    }
+    
+
+    MPI_Bcast((dtype*)l_core1->data,len_core, MPI_DOUBLE,0, MPI_COMM_WORLD);
+
+
+
+    char * core_name = "core";
+
+    Tensor<dtype>* l_core = new Tensor<dtype>(core->order,
+                                        core->lens,
+                                        local_world,
+                                        *core->sr,
+                                        core_name,
+                                        0
+                                        );
+    memcpy((dtype*)l_core->data,(dtype *)l_core1->data,len_core*sizeof(dtype));
+    
+
+    delete l_core1;
+    t_mttkrp_remap.stop();
+
+    Timer t_mttkrp_work("MTTKRP_Tucker_work");
+    t_mttkrp_work.start();
+
+    { int R = l_core->lens[mode] ;
+      Tensor<dtype> ** vecs = (Tensor<dtype>**)malloc(sizeof(Tensor <dtype> *)*(T->order));
+      dtype ** vec_data = (dtype**)malloc(sizeof(dtype*)*T->order);
+      for(int i = 0 ; i < T->order ; i++){
+          vecs[i] = new Vector <dtype>(mat_list[i]->lens[1-aux_mode_first], local_world, *T->sr);
+          vec_data[i] = (dtype*)vecs[i]->data;
+      }
+      int index_mode;
+      int incX = 1;
+      for(int64_t e=0; e<npair ; e++){
+        int64_t key = pairs[e].k;
+        for(int i = 0 ; i < T->order ; i++){
+          int64_t ke= key/ldas[i];
+          int index = (ke%T->lens[i])/phys_phase[i];
+          if (i!=mode){
+            //CTF_int::default_vec_mul(&arrs[i][index*R], H+q*R, H+q*R, R) ;
+            std::copy(&arrs[i][index*l_core->lens[i]], &arrs[i][(index+1)*l_core->lens[i]], vec_data[i]) ; 
+          }
+          else{
+            //std::fill(&arrs[mode][index*R], &arrs[mode][(index+1)*R] , pairs[e].d);
+            index_mode = index ;
+          }
+        }
+        if (mode ==0){
+          vecs[0]->operator[]("i") = l_core->operator[]("ijk")*vecs[1]->operator[]("j")*vecs[2]->operator[]("k");
+        }
+        else if (mode ==1){
+            vecs[1]->operator[]("j") = l_core->operator[]("ijk")*vecs[0]->operator[]("i")*vecs[2]->operator[]("k");
+        }
+        else{
+            vecs[2]->operator[]("k") = l_core->operator[]("ijk")*vecs[0]->operator[]("i")*vecs[1]->operator[]("j");
+        }
+        CTF_BLAS::axpy(&R,&pairs[e].d,vec_data[mode],&incX,&arrs[mode][index_mode*R],&incX);
+        //std::copy(vec_data[mode], vec_data[mode] + l_core->lens[mode], &arrs[mode][index_mode*l_core->lens[mode]]) ;
+        //CTF_int::default_vec_mul(vec_data[mode], &arrs[mode][index_mode*R], &arrs[mode][index_mode*R],R ) ;
+      }
+      
+    
+      for(int i = 0 ; i < T->order ; i++){
+          delete vecs[i]; 
+      }
+      delete l_core;
+      free(vec_data);
+      free(vecs);
+    }
+    t_mttkrp_work.stop();
+    
+    for (int j=0; j<T->order; j++){
+      if (j == mode){
+        int red_len = T->wrld->np/phys_phase[j];
+        if (red_len > 1){
+          int64_t sz;
+          if (redist_mats[j] == NULL){
+            if (is_vec)
+              sz = T->lens[j];
+            else
+              sz = T->lens[j]*k[j];
+          } else {
+            sz = redist_mats[j]->size;
+          }
+          int jr = T->edge_map[j].calc_phys_rank(T->topo);
+          MPI_Comm cm;
+          MPI_Comm_split(T->wrld->comm, jr, T->wrld->rank, &cm);
+          int cmr;
+          MPI_Comm_rank(cm, &cmr);
+
+          Timer t_mttkrp_red("MTTKRP_Tucker_Reduce");
+          t_mttkrp_red.start();
+          if (cmr == 0)
+            MPI_Reduce(MPI_IN_PLACE, arrs[j], sz, T->sr->mdtype(), T->sr->addmop(), 0, cm);
+          else {
+            MPI_Reduce(arrs[j], NULL, sz, T->sr->mdtype(), T->sr->addmop(), 0, cm);
+            std::fill(arrs[j], arrs[j]+sz, *((dtype*)T->sr->addid()));
+          }
+          t_mttkrp_red.stop();
+          MPI_Comm_free(&cm);
+        }
+        if (redist_mats[j] != NULL){
+          mat_list[j]->set_zero();
+          mat_list[j]->operator[]("ij") += redist_mats[j]->operator[]("ij");
+          delete redist_mats[j];
+        } else {
+          IASSERT((dtype*)mat_list[j]->data == arrs[j]);
+        }
+      } else {
+        if (redist_mats[j] != NULL){
+          if (redist_mats[j]->data != (char*)arrs[j])
+            T->sr->dealloc((char*)arrs[j]);
+          delete redist_mats[j];
+        } else {
+          if (arrs[j] != (dtype*)mat_list[j]->data)
+            T->sr->dealloc((char*)arrs[j]);
+        }
+      }
+    }
+    free(redist_mats);
+    free(par_idx);
+    free(phys_phase);
+    free(ldas);
+    free(arrs);
+    if (!T->is_sparse)
+      T->sr->pair_dealloc((char*)pairs);
+    t_mttkrp.stop();
+  }
+
+
+  template<typename dtype>
+  void TTTP_Tucker(Tensor<dtype> * T, Tensor<dtype> ** mat_list, Tensor<dtype> * core,  bool aux_mode_first){
+    Timer t_mttkrp("TTTP_Tucker");
+    t_mttkrp.start();
+    int k[T->order] ;
+    for (int i =0 ; i< T->order; i++)
+      k[i] = -1;
+    bool is_vec[T->order];
+    for (int i =0 ; i< T->order ; i++)
+      is_vec[i] = mat_list[i]->order == 1;
+    for (int i =0 ; i< T->order ; i++){
+      if (!is_vec[i]){
+        k[i] = mat_list[i]->lens[1-aux_mode_first];
+      }
+    }
+    for (int i=0; i<T->order; i++){
+      IASSERT(is_vec[i] || T->lens[i] == mat_list[i]->lens[aux_mode_first]);
+      IASSERT(!mat_list[i]->is_sparse);
+    }
+    dtype ** arrs = (dtype**)malloc(sizeof(dtype*)*T->order);
+    int64_t * ldas = (int64_t*)malloc(T->order*sizeof(int64_t));
+    int * phys_phase = (int*)malloc(T->order*sizeof(int));
+    int * mat_strides = NULL;
+    for (int i=0; i<T->order; i++){
+      phys_phase[i] = T->edge_map[i].calc_phys_phase();
+    }
+
+    int64_t npair;
+    Pair<dtype> * pairs;
+    if (T->is_sparse){
+      pairs = (Pair<dtype>*)T->data;
+      npair = T->nnz_loc;
+    } 
+    else
+      T->get_local_pairs(&npair, &pairs, true, false);
+
+    ldas[0] = 1;
+    for (int i=1; i<T->order; i++){
+      ldas[i] = ldas[i-1] * T->lens[i-1];
+    }
+
+    Tensor<dtype> ** redist_mats = (Tensor<dtype>**)malloc(sizeof(Tensor<dtype>*)*T->order); 
+
+    Partition par(T->topo->order, T->topo->lens);
+    char * par_idx = (char*)malloc(sizeof(char)*T->topo->order);
+    for (int i=0; i<T->topo->order; i++){
+      par_idx[i] = 'a'+i+1;
+    }
+    char mat_idx[2];
+
+    dtype * acc_arr = NULL;
+    acc_arr = (dtype*)T->sr->alloc(npair);
+    for (int64_t i=0; i<npair; i++)
+        acc_arr[i] = 1.;
+
+    Timer t_mttkrp_remap("TTTP_Tucker_remap_mats");
+    t_mttkrp_remap.start();
+    int nrow[T->order], ncol[T->order] ; 
+    for (int i=0; i<T->order; i++){
+      Tensor<dtype> * mat = mat_list[i];
+      int64_t tot_sz;
+      if (is_vec[i])
+        tot_sz = T->lens[i];
+      else
+        tot_sz = T->lens[i]*k[i];
+      if (aux_mode_first){
+        nrow[i] = k[i];
+        ncol[i] = T->lens[i];
+      } else {
+        nrow[i] = T->lens[i];
+        ncol[i] = k[i];
+      }
+      if (phys_phase[i] == 1){
+        if (is_vec[i])
+            arrs[i] = (dtype*)T->sr->alloc(T->lens[i]);
+          else
+            arrs[i] = (dtype*)T->sr->alloc(T->lens[i]*k[i]);
+          mat->read_all(arrs[i], true);
+          redist_mats[i] = NULL;
+      } 
+      else {
+        int topo_dim = T->edge_map[i].cdt;
+        IASSERT(T->edge_map[i].type == CTF_int::PHYSICAL_MAP);
+        IASSERT(!T->edge_map[i].has_child || T->edge_map[i].child->type != CTF_int::PHYSICAL_MAP);
+        int comm_lda = 1;
+        for (int l=0; l<topo_dim; l++){
+          comm_lda *= T->topo->dim_comm[l].np;
+        }
+        CTF_int::CommData cmdt(T->wrld->rank-comm_lda*T->topo->dim_comm[topo_dim].rank,T->topo->dim_comm[topo_dim].rank,T->wrld->cdt);
+        if (is_vec[i]){
+          Vector<dtype> * v = new Vector<dtype>(mat_list[i]->lens[0], par_idx[topo_dim], par[par_idx], Idx_Partition(), 0, *T->wrld, *T->sr);
+          v->operator[]("i") += mat_list[i]->operator[]("i");
+          redist_mats[i] = v;
+          arrs[i] = (dtype*)v->data;
+          cmdt.bcast(v->data,v->size,T->sr->mdtype(),0);
+        } 
+        else {
+          if (aux_mode_first){
+            mat_idx[0] = 'a';
+            mat_idx[1] = par_idx[topo_dim];
+          } else {
+            mat_idx[0] = par_idx[topo_dim];
+            mat_idx[1] = 'a';
+          }
+          Matrix<dtype> * m = new Matrix<dtype>(nrow[i], ncol[i], mat_idx, par[par_idx], Idx_Partition(), 0, *T->wrld, *T->sr);
+          m->operator[]("ij") += mat->operator[]("ij");
+          redist_mats[i] = m;
+          arrs[i] = (dtype*)m->data;
+          cmdt.bcast(m->data,m->size,T->sr->mdtype(),0);
+        }
+      }
+    }
+
+    World local_world = CTF::World::World(MPI_COMM_SELF);
+    int total_size ; 
+    MPI_Comm_size(MPI_COMM_WORLD, &total_size);
+    Partition Partition1D(1, &total_size);
+
+
+    char nonastr_core[core->order];
+    for(int i = 0 ; i < core->order ; i++){
+      nonastr_core[i] = 'a' - i-1 ;
+    }
+    char * core_name1 = "lcore";
+
+    //B = new Tensor <dtype>(..., Partition1D["i"], Idx_Partition(), World(MPI_COMM_WORLD))
+    Tensor<dtype>* l_core1 = new Tensor<dtype>(core->order,
+                                        core->lens,
+                                        core->sym,
+                                        *T->wrld,
+                                        nonastr_core,
+                                        Partition1D["i"],
+                                        Idx_Partition(),
+                                        core_name1,
+                                        0,
+                                        *core->sr
+                                        );
+    l_core1->operator[]("ijk") += core->operator[]("ijk");
+
+    int len_core=1;
+    for(int i =0; i <l_core1->order ; i++){
+        len_core = len_core*l_core1->lens[i];
+    }
+    
+
+    MPI_Bcast((dtype*)l_core1->data,len_core, MPI_DOUBLE,0, MPI_COMM_WORLD);
+
+
+    char * core_name = "core";
+
+    Tensor<dtype>* l_core = new Tensor<dtype>(core->order,
+                                        core->lens,
+                                        local_world,
+                                        *core->sr,
+                                        core_name,
+                                        0
+                                        );
+    memcpy((dtype*)l_core->data,(dtype *)l_core1->data,len_core*sizeof(dtype));
+    
+
+
+    delete l_core1;
+    t_mttkrp_remap.stop();
+
+    Timer t_mttkrp_work("TTTP_Tucker_work");
+    t_mttkrp_work.start();
+    Tensor<dtype> ** vecs = (Tensor<dtype>**)malloc(sizeof(Tensor <dtype> *)*(T->order));
+    dtype ** vec_data = (dtype**)malloc(sizeof(dtype*)*T->order);
+    for(int i = 0 ; i < T->order ; i++){
+        vecs[i] = new Vector <dtype>(l_core->lens[i], local_world, *T->sr);
+        vec_data[i] = (dtype*)vecs[i]->data;
+    }
+    //Vector <dtype>* scalar_v ;
+    Scalar <dtype>* Sc = new Scalar <dtype>(local_world, *l_core->sr) ;
+    //dtype* pointer ;  
+    for(int64_t e=0; e<npair ; e++){
+      int64_t key = pairs[e].k;
+      for(int i = 0 ; i < T->order ; i++){
+        int64_t ke= key/ldas[i];
+        int index = (ke%T->lens[i])/phys_phase[i];
+        std::copy(&arrs[i][index*l_core->lens[i]], &arrs[i][(index+1)*l_core->lens[i]], vec_data[i]) ; 
+      }
+      //printf("copied for %d\n",e);
+      Sc->operator[]("") = l_core->operator[]("ijk")*vecs[0]->operator[]("i")*vecs[1]->operator[]("j")*vecs[2]->operator[]("k");
+      acc_arr[e] = Sc->get_val() ; 
+      //printf("%f \n", Sc->get_val());
+    }
+    
+    for(int i = 0 ; i < T->order ; i++){
+        delete vecs[i]; 
+    }
+    delete l_core;
+    free(vec_data);
+    free(vecs);
+    t_mttkrp_work.stop();
+    
+    for (int j=0; j<T->order; j++){
+      if (redist_mats[j] != NULL){
+        if (redist_mats[j]->data != (char*)arrs[j])
+          T->sr->dealloc((char*)arrs[j]);
+        delete redist_mats[j];
+      } 
+      else {
+          T->sr->dealloc((char*)arrs[j]);
+      }
+    }
+    if (acc_arr != NULL){
+      for (int64_t i=0; i<npair; i++){
+        pairs[i].d *= acc_arr[i];
+      }
+      T->sr->dealloc((char*)acc_arr);
+    }
+    if (!T->is_sparse){
+      T->write(npair, pairs);
+      T->sr->pair_dealloc((char*)pairs);
+    }
+    free(redist_mats);
+    free(par_idx);
+    free(phys_phase);
+    free(ldas);
+    free(arrs);
+    t_mttkrp.stop();
+  }
+
+  template<typename dtype>
+  void TTMC(Tensor<dtype> * T, Tensor<dtype> ** mat_list, Tensor<dtype> * core, bool aux_mode_first){
+    Timer t_mttkrp("TTMC");
+    t_mttkrp.start();
+    int k[T->order] ;
+    for (int i =0 ; i< T->order; i++)
+      k[i] = -1;
+    bool is_vec[T->order];
+    for (int i =0 ; i< T->order ; i++)
+      is_vec[i] = mat_list[i]->order == 1;
+    for (int i =0 ; i< T->order ; i++){
+      if (!is_vec[i]){
+        k[i] = mat_list[i]->lens[1-aux_mode_first];
+      }
+    }
+    for (int i=0; i<T->order; i++){
+      IASSERT(is_vec[i] || T->lens[i] == mat_list[i]->lens[aux_mode_first]);
+      IASSERT(!mat_list[i]->is_sparse);
+    }
+    dtype ** arrs = (dtype**)malloc(sizeof(dtype*)*T->order);
+    int64_t * ldas = (int64_t*)malloc(T->order*sizeof(int64_t));
+    int * phys_phase = (int*)malloc(T->order*sizeof(int));
+    int * mat_strides = NULL;
+    for (int i=0; i<T->order; i++){
+      phys_phase[i] = T->edge_map[i].calc_phys_phase();
+    }
+
+    int64_t npair;
+    Pair<dtype> * pairs;
+    if (T->is_sparse){
+      pairs = (Pair<dtype>*)T->data;
+      npair = T->nnz_loc;
+    } 
+    else
+      T->get_local_pairs(&npair, &pairs, true, false);
+
+    ldas[0] = 1;
+    for (int i=1; i<T->order; i++){
+      ldas[i] = ldas[i-1] * T->lens[i-1];
+    }
+
+    Tensor<dtype> ** redist_mats = (Tensor<dtype>**)malloc(sizeof(Tensor<dtype>*)*T->order); 
+
+    Partition par(T->topo->order, T->topo->lens);
+    char * par_idx = (char*)malloc(sizeof(char)*T->topo->order);
+    for (int i=0; i<T->topo->order; i++){
+      par_idx[i] = 'a'+i+1;
+    }
+    char mat_idx[2];
+
+    Timer t_mttkrp_remap("TTMC_remap_mats");
+    t_mttkrp_remap.start();
+    int nrow[T->order], ncol[T->order] ; 
+    for (int i=0; i<T->order; i++){
+      Tensor<dtype> * mat = mat_list[i];
+      int64_t tot_sz;
+      if (is_vec[i])
+        tot_sz = T->lens[i];
+      else
+        tot_sz = T->lens[i]*k[i];
+      if (aux_mode_first){
+        nrow[i] = k[i];
+        ncol[i] = T->lens[i];
+      } else {
+        nrow[i] = T->lens[i];
+        ncol[i] = k[i];
+      }
+      if (phys_phase[i] == 1){
+        if (is_vec[i])
+            arrs[i] = (dtype*)T->sr->alloc(T->lens[i]);
+          else
+            arrs[i] = (dtype*)T->sr->alloc(T->lens[i]*k[i]);
+          mat->read_all(arrs[i], true);
+          redist_mats[i] = NULL;
+      } 
+      else {
+        int topo_dim = T->edge_map[i].cdt;
+        IASSERT(T->edge_map[i].type == CTF_int::PHYSICAL_MAP);
+        IASSERT(!T->edge_map[i].has_child || T->edge_map[i].child->type != CTF_int::PHYSICAL_MAP);
+        int comm_lda = 1;
+        for (int l=0; l<topo_dim; l++){
+          comm_lda *= T->topo->dim_comm[l].np;
+        }
+        CTF_int::CommData cmdt(T->wrld->rank-comm_lda*T->topo->dim_comm[topo_dim].rank,T->topo->dim_comm[topo_dim].rank,T->wrld->cdt);
+        if (is_vec[i]){
+          Vector<dtype> * v = new Vector<dtype>(mat_list[i]->lens[0], par_idx[topo_dim], par[par_idx], Idx_Partition(), 0, *T->wrld, *T->sr);
+          v->operator[]("i") += mat_list[i]->operator[]("i");
+          redist_mats[i] = v;
+          arrs[i] = (dtype*)v->data;
+          cmdt.bcast(v->data,v->size,T->sr->mdtype(),0);
+        } 
+        else {
+          if (aux_mode_first){
+            mat_idx[0] = 'a';
+            mat_idx[1] = par_idx[topo_dim];
+          } else {
+            mat_idx[0] = par_idx[topo_dim];
+            mat_idx[1] = 'a';
+          }
+          Matrix<dtype> * m = new Matrix<dtype>(nrow[i], ncol[i], mat_idx, par[par_idx], Idx_Partition(), 0, *T->wrld, *T->sr);
+          m->operator[]("ij") += mat->operator[]("ij");
+          redist_mats[i] = m;
+          arrs[i] = (dtype*)m->data;
+          cmdt.bcast(m->data,m->size,T->sr->mdtype(),0);
+        }
+      }
+    }
+
+    World local_world = CTF::World::World(MPI_COMM_SELF);
+    int total_size ; 
+    
+    t_mttkrp_remap.stop();
+
+    Timer t_mttkrp_work("TTMC_Tucker_work");
+    t_mttkrp_work.start();
+    Tensor<dtype> ** vecs = (Tensor<dtype>**)malloc(sizeof(Tensor <dtype> *)*(T->order));
+    dtype ** vec_data = (dtype**)malloc(sizeof(dtype*)*T->order);
+    for(int i = 0 ; i < T->order ; i++){
+        vecs[i] = new Vector <dtype>(mat_list[i]->lens[1-aux_mode_first], local_world, *T->sr);
+        vec_data[i] = (dtype*)vecs[i]->data;
+    }
+
+    char * core_name = "l_core";
+
+    int lens_c[T->order];
+    for(int i=0 ; i<T->order ; i++){
+      lens_c[i] = mat_list[i]->lens[1-aux_mode_first];
+    }
+
+    Tensor<dtype>* l_core = new Tensor<dtype>(T->order,
+                                        lens_c,
+                                        local_world,
+                                        *T->sr,
+                                        core_name,
+                                        0
+                                        );
+    for(int64_t e=0; e<npair ; e++){
+      int64_t key = pairs[e].k;
+      for(int i = 0 ; i < T->order ; i++){
+        int64_t ke= key/ldas[i];
+        int index = (ke%T->lens[i])/phys_phase[i];
+        std::copy(&arrs[i][index*l_core->lens[i]], &arrs[i][(index+1)*l_core->lens[i]], vec_data[i]) ; 
+      }
+      l_core->operator[]("ijk") += pairs[e].d*vecs[0]->operator[]("i")*vecs[1]->operator[]("j")*vecs[2]->operator[]("k");
+    }
+    
+    for(int i = 0 ; i < T->order ; i++){
+        delete vecs[i]; 
+    }
+
+    free(vec_data);
+    free(vecs);
+    t_mttkrp_work.stop();
+
+    int len_core=1;
+    for(int i =0; i <l_core->order ; i++){
+        len_core = len_core*l_core->lens[i];
+    }
+
+    int rank;
+    MPI_Comm_size(MPI_COMM_WORLD, &total_size);
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    Partition Partition1D(1, &total_size);
+
+
+    char nonastr_core[core->order];
+    for(int i = 0 ; i < core->order ; i++){
+      nonastr_core[i] = 'a' - i-1 ;
+    }
+    char * core_name1 = "core";
+
+    //B = new Tensor <dtype>(..., Partition1D["i"], Idx_Partition(), World(MPI_COMM_WORLD))
+    Tensor<dtype>* temp_core = new Tensor<dtype>(l_core->order,
+                                        l_core->lens,
+                                        l_core->sym,
+                                        *T->wrld,
+                                        nonastr_core,
+                                        Partition1D["i"],
+                                        Idx_Partition(),
+                                        core_name1,
+                                        0,
+                                        *l_core->sr
+                                        );
+
+    //MPI_Bcast((dtype*)l_core1->data,len_core, MPI_DOUBLE,0, MPI_COMM_WORLD);
+    if (rank ==0){
+      MPI_Reduce( MPI_IN_PLACE ,(dtype *)l_core->data,len_core,MPI_DOUBLE,MPI_SUM,0,MPI_COMM_WORLD);
+    }
+    else{
+      MPI_Reduce( (dtype *)l_core->data ,(dtype *)l_core->data,len_core,MPI_DOUBLE,MPI_SUM,0,MPI_COMM_WORLD);
+    }
+
+    if (rank==0)
+      memcpy((dtype*)temp_core->data,(dtype *)l_core->data,len_core*sizeof(dtype));
+
+
+    //temp_core->read_all(l_core_data,true);
+
+    //printf("Reads \n");
+
+
+    core->operator[]("ijk") = temp_core->operator[]("ijk");
+
+
+    delete l_core ; 
+
+
+    delete temp_core;
+
+    
+
+
+    
+    //printf("Deleted pointer to data \n");
+    
+    for (int j=0; j<T->order; j++){
+      if (redist_mats[j] != NULL){
+        if (redist_mats[j]->data != (char*)arrs[j])
+          T->sr->dealloc((char*)arrs[j]);
+        delete redist_mats[j];
+      } 
+      else {
+          T->sr->dealloc((char*)arrs[j]);
+      }
+    }
+    if (!T->is_sparse){
+      T->write(npair, pairs);
+      T->sr->pair_dealloc((char*)pairs);
+    }
+    free(redist_mats);
+    free(par_idx);
+    free(phys_phase);
+    free(ldas);
+    free(arrs);
+    t_mttkrp.stop();
+  }
 }
+
+
+
+

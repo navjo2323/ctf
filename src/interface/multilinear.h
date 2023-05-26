@@ -59,12 +59,14 @@ namespace CTF {
   template<typename dtype>
   void Solve_Factor(Tensor<dtype> * T, Tensor<dtype> ** mat_list, Tensor<dtype> * RHS, int mode, double regu, bool aux_mode_first);
 
-
   template<typename dtype>
   void Sparse_add(Tensor<dtype> * T, Tensor<dtype> * M,double alpha, double beta);
 
   template<typename dtype>
   void Sparse_mul(Tensor<dtype> * T, Tensor<dtype> * M);
+
+  template<typename dtype>
+  double Sparse_inner_prod(Tensor<dtype> * T, Tensor<dtype> * M);
 
   template<typename dtype>
   void Sparse_exp(Tensor<dtype> * T);
@@ -77,6 +79,16 @@ namespace CTF {
 
   template<typename dtype>
   void Solve_Factor_Tucker(Tensor<dtype> * T, Tensor<dtype> ** mat_list, Tensor<dtype> * core, Tensor<dtype> * RHS, int mode, double regu, bool aux_mode_first);
+  
+  template<typename dtype>
+  void MTTKRP_Tucker(Tensor<dtype> * T, Tensor<dtype> ** mat_list,Tensor<dtype> * core,  int mode, bool aux_mode_first);
+
+  template<typename dtype>
+  void TTTP_Tucker(Tensor<dtype> * T, Tensor<dtype> ** mat_list,Tensor<dtype> * core,  bool aux_mode_first);
+
+  template<typename dtype>
+  void TTMC(Tensor<dtype> * T, Tensor<dtype> ** mat_list, Tensor<dtype> * core, bool aux_mode_first);
+
 }
 
 #endif
