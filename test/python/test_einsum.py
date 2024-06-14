@@ -175,6 +175,7 @@ class KnowValues(unittest.TestCase):
             mats = []
             num = np.random.randint(N)
             lens = np.random.randint(10,20,N)
+            regu = 1e-04
             for i in range(N):
                 if i !=num:
                     mats.append(ctf.random.random([lens[i],R]))
@@ -198,8 +199,47 @@ class KnowValues(unittest.TestCase):
             rhs_np = RHS.to_nparray()
             ans = np.zeros_like(rhs_np)
             for i in range(mats[num].shape[0]):
-                ans[i,:] = la.solve(lhs_np[i],rhs_np[i,:])
-            ctf.Solve_Factor(A,mats,RHS,num)
+                ans[i,:] = la.solve(lhs_np[i]+regu*np.eye(R),rhs_np[i,:])
+            ctf.Solve_Factor(A,mats,RHS,num,regu)
+            self.assertTrue(np.allclose(ans, mats[num].to_nparray()))
+
+    def test_Solve_Factor_Tucker(self):
+        for N in range(3,6):
+            mats = []
+            num = np.random.randint(N)
+            lens = np.random.randint(10,25,N)
+            ranks = np.random.randint(2,6,N)
+            regu = 1e-04
+            for i in range(N):
+                if i !=num:
+                    mats.append(ctf.random.random([lens[i],ranks[i]]))
+                else:
+                    mats.append(ctf.tensor([lens[i],ranks[i]]))
+            RHS = ctf.random.random([lens[num],ranks[num]])
+            core = ctf.random.random(ranks)
+            A = ctf.tensor(lens,sp=1)
+            A.fill_sp_random(1., 1., 0.2)
+            T_inds = "".join([chr(ord('a')+i) for i in range(A.ndim)])
+            core_inds = "".join([chr(ord('r')+i) for i in range(core.ndim)])
+            core_inds2 = "".join([chr(ord('l')+i) for i in range(core.ndim)])
+            einstr= T_inds+','
+            lst_mat = []
+            lst_mat.append(A.to_nparray())
+            for i in range(N):
+                if i != num:
+                    einstr+=chr(ord('a')+i) + chr(ord('r')+i) + ','
+                    lst_mat.append(mats[i].to_nparray())
+                    einstr+=chr(ord('a')+i) + chr(ord('l')+i) + ','
+                    lst_mat.append(mats[i].to_nparray())
+            lst_mat.append(core.to_nparray())
+            lst_mat.append(core.to_nparray())
+            einstr+= core_inds + ','+core_inds2+'->'+chr(ord('a')+num)+chr(ord('r')+num)+chr(ord('l')+num)
+            lhs_np = np.einsum(einstr,*lst_mat,optimize=True)
+            rhs_np = RHS.to_nparray()
+            ans = np.zeros_like(rhs_np)
+            for i in range(mats[num].shape[0]):
+                ans[i,:] = la.solve(lhs_np[i]+regu*np.eye(ranks[num]),rhs_np[i,:])
+            ctf.Solve_Factor_Tucker(A,mats,core,RHS,num,regu)
             self.assertTrue(np.allclose(ans, mats[num].to_nparray()))
 
     def test_TTTP_vec(self):
@@ -268,4 +308,3 @@ if __name__ == "__main__":
     result = run_tests()
     ctf.MPI_Stop()
     sys.exit(not result)
-    

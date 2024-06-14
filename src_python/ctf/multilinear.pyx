@@ -7,7 +7,9 @@ from ctf.profile import timer
 cdef extern from "ctf.hpp" namespace "CTF":
     cdef void TTTP_ "CTF::TTTP"[dtype](Tensor[dtype] * T, int num_ops, int * modes, Tensor[dtype] ** mat_list, bool aux_mode_first)
     cdef void MTTKRP_ "CTF::MTTKRP"[dtype](Tensor[dtype] * T, Tensor[dtype] ** mat_list, int mode, bool aux_mode_first)
-    cdef void Solve_Factor_ "CTF::Solve_Factor"[dtype](Tensor[dtype] * T, Tensor[dtype] ** mat_list,Tensor[dtype] * RHS, int mode, bool aux_mode_first)
+    cdef void Solve_Factor_ "CTF::Solve_Factor"[dtype](Tensor[dtype] * T, Tensor[dtype] ** mat_list,Tensor[dtype] * RHS, int mode, double regu, bool aux_mode_first)
+    cdef void Solve_Factor_Tucker_ "CTF::Solve_Factor_Tucker"[dtype](Tensor[dtype] * T, Tensor[dtype] ** mat_list,Tensor[dtype] * core,Tensor[dtype] * RHS, int mode, double regu, bool aux_mode_first)
+
 def TTTP(tensor A, mat_list):
     """
     TTTP(A, mat_list)
@@ -128,9 +130,9 @@ def MTTKRP(tensor A, mat_list, mode):
     free(tsrs)
     t_mttkrp.stop()
 
-def Solve_Factor(tensor A, mat_list, tensor R, mode):
+def Solve_Factor(tensor A, mat_list, tensor R, mode,regu):
     """
-    Solve_Factor(A, mat_list,R, mode)
+    Solve_Factor(A, mat_list,R, mode,regu)
     solves for a factor matrix parallelizing over rows given rhs, sparse tensor and list of factor matrices
     eg. for mode=0 order 3 tensor Computes LHS = einsum("ijk,jr,jz,kr,kz->irz",T,B,B,C,C) and solves each row with rhs
     in parallel 
@@ -151,7 +153,7 @@ def Solve_Factor(tensor A, mat_list, tensor R, mode):
     t_solve_factor = timer("pySolve_factor")
     t_solve_factor.start()
     if len(mat_list) != A.ndim:
-        raise ValueError('CTF PYTHON ERROR: mat_list argument to MTTKRP must be of same length as ndim')
+        raise ValueError('CTF PYTHON ERROR: mat_list argument to Solve_Factor must be of same length as ndim')
     k = -1
     tsrs = <Tensor[double]**>malloc(len(mat_list)*sizeof(ctensor*))
     #tsr_list = []
@@ -178,10 +180,64 @@ def Solve_Factor(tensor A, mat_list, tensor R, mode):
     B = tensor(copy=A)
     RHS = tensor(copy=R)
     if A.dtype == np.float64:
-        Solve_Factor_[double](<Tensor[double]*>B.dt,tsrs,<Tensor[double]*>RHS.dt,A.ndim-mode-1,1)
+        Solve_Factor_[double](<Tensor[double]*>B.dt,tsrs,<Tensor[double]*>RHS.dt,A.ndim-mode-1,regu,1)
     else:
         raise ValueError('CTF PYTHON ERROR: Solve_Factor does not support this dtype')
     free(tsrs)
     t_solve_factor.stop()
 
+def Solve_Factor_Tucker(tensor A, mat_list, tensor C, tensor R, mode,regu):
+    """
+    Solve_Factor_Tucker(A, mat_list,core,R, mode,regu)
+    solves for a factor matrix parallelizing over rows given rhs, sparse tensor and list of factor matrices
+    eg. for mode=0 order 3 tensor Computes LHS = einsum("ijk,jr,jz,kr,kz->irz",T,B,B,C,C) and solves each row with rhs
+    in parallel 
+    
+    Parameters
+    ----------
+    A: tensor_like
+       Input tensor of arbitrary ndim
+
+    mat_list: list of size A.ndim containing matrices that are n_i-by-R where n_i is dimension of ith mode of A
+    and mat_list[mode] will contain the output
+    
+    R: ctf array Right hand side of dimension I_{mode} x R
+
+    mode: integer for mode with 0 indexing
+
+    """
+    t_solve_factor_t = timer("pySolve_factor_Tucker")
+    t_solve_factor_t.start()
+    if len(mat_list) != A.ndim:
+        raise ValueError('CTF PYTHON ERROR: mat_list argument to Solve_Factor_Tucker must be of same length as ndim')
+    k = -1
+    tsrs = <Tensor[double]**>malloc(len(mat_list)*sizeof(ctensor*))
+    #tsr_list = []
+    imode = 0
+    cdef tensor t
+    for i in range(len(mat_list))[::-1]:
+        t = mat_list[i]
+        tsrs[imode] = <Tensor[double]*>t.dt
+        imode += 1
+        if mat_list[i].ndim == 1:
+            if k != -1:
+                raise ValueError('CTF PYTHON ERROR: mat_list must contain only vectors or only matrices')
+            if mat_list[i].shape[0] != A.shape[i]:
+                raise ValueError('CTF PYTHON ERROR: input vector to SOLVE_FACTOR_TUCKER does not match the corresponding tensor dimension')
+                        #exp = exp*mat_list[i].i(s[i])
+        else:
+            if mat_list[i].ndim != 2:
+                raise ValueError('CTF PYTHON ERROR: mat_list operands has invalid dimension')
+            # Add for core dimensions should match
+            if k == -1:
+                if mat_list[i].shape[1] != C.shape[i]:
+                    raise ValueError('CTF PYTHON ERROR: input matrix to SOLVE_FACTOR_TUCKER does not match the corresponding Core dimension')
+    B = tensor(copy=A)
+    RHS = tensor(copy=R)
+    if A.dtype == np.float64:
+        Solve_Factor_Tucker_[double](<Tensor[double]*>B.dt,tsrs,<Tensor[double]*>C.dt,<Tensor[double]*>RHS.dt,A.ndim-mode-1,regu,1)
+    else:
+        raise ValueError('CTF PYTHON ERROR: Solve_Factor_Tucker does not support this dtype')
+    free(tsrs)
+    t_solve_factor_t.stop()
 

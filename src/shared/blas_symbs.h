@@ -8,6 +8,10 @@
 #define DGEMM dgemm_
 #define CGEMM cgemm_
 #define ZGEMM zgemm_
+#define SGEMV sgemv_
+#define DGEMV dgemv_
+#define CGEMV cgemv_
+#define ZGEMV zgemv_
 #define SGEMM_BATCH sgemm_batch_
 #define DGEMM_BATCH dgemm_batch_
 #define CGEMM_BATCH cgemm_batch_
@@ -20,10 +24,14 @@
 #define DSYR   dsyr_
 #define CSYR   csyr_
 #define ZSYR   zsyr_
-#define SPOSV   sposv_
-#define DPOSV   dposv_
-#define CPOSV   cposv_
-#define ZPOSV   zposv_
+#define SSYRK  ssyrk_
+#define DSYRK  dsyrk_
+#define CSYRK  csyrk_
+#define ZSYRK  zsyrk_
+#define SPOSV  sposv_
+#define DPOSV  dposv_
+#define CPOSV  cposv_
+#define ZPOSV  zposv_
 #define SSCAL sscal_
 #define DSCAL dscal_
 #define CSCAL cscal_
@@ -37,6 +45,10 @@
 #define DGEMM dgemm
 #define CGEMM cgemm
 #define ZGEMM zgemm
+#define SGEMV sgemv
+#define DGEMV dgemv
+#define CGEMV cgemv
+#define ZGEMV zgemv
 #define SGEMM_BATCH sgemm_batch
 #define DGEMM_BATCH dgemm_batch
 #define CGEMM_BATCH cgemm_batch
@@ -49,10 +61,14 @@
 #define DSYR   dsyr
 #define CSYR   csyr
 #define ZSYR   zsyr
-#define SPOSV   sposv
-#define DPOSV   dposv
-#define CPOSV   cposv
-#define ZPOSV   zposv
+#define SSYRK  ssyrk
+#define DSYRK  dsyrk
+#define CSYRK  csyrk
+#define ZSYRK  zsyrk
+#define SPOSV  sposv
+#define DPOSV  dposv
+#define CPOSV  cposv
+#define ZPOSV  zposv
 #define SSCAL sscal
 #define DSCAL dscal
 #define CSCAL cscal
@@ -156,6 +172,72 @@ namespace CTF_BLAS {
             dtype *,
             const int *);
 
+  extern "C"
+  void SGEMV(const char *   TRANS,
+             const int *    M,
+             const int *    N,
+             const float *  ALPHA,
+             float *        A,
+             const int *    LDA,
+             float *        X,
+             const int *    INCX,
+             const float *  BETA,
+             float *        Y,
+             const int *    INCY);
+
+
+  extern "C"
+  void DGEMV(const char *   TRANS,
+             const int *    M,
+             const int *    N,
+             const double * ALPHA,
+             double *       A,
+             const int *    LDA,
+             double *       X,
+             const int *    INCX,
+             const double * BETA,
+             double *       Y,
+             const int *    INCY);
+
+  extern "C"
+  void CGEMV(const char *   TRANS,
+             const int *    M,
+             const int *    N,
+             const std::complex<float> *  ALPHA,
+             std::complex<float> *        A,
+             const int *                  LDA,
+             std::complex<float> *        X,
+             const int *                  INCX,
+             const std::complex<float> *  BETA,
+             std::complex<float> *        Y,
+             const int *                  INCY);
+
+  extern "C"
+  void ZGEMV(const char *         TRANS,
+             const int *          M,
+             const int *          N,
+             const std::complex<double> *   ALPHA,
+             std::complex<double> *         A,
+             const int *                    LDA,
+             std::complex<double> *         X,
+             const int *                    INCX,
+             const std::complex<double> *   BETA,
+             std::complex<double> *         Y,
+             const int *                    INCY);
+
+  template <typename dtype>
+  void gemv(const char *    TRANS,
+            const int *     M,
+            const int *     N,
+            const dtype *   ALPHA,
+            dtype *         A,
+            const int *     LDA,
+            dtype *         X,
+            const int *     INCX,
+            const dtype *   BETA,
+            dtype *         Y,
+            const int *     INCY);
+
 
   extern "C"
   void SAXPY(const int *   n,
@@ -238,11 +320,70 @@ namespace CTF_BLAS {
             dtype *           A , 
             const int *        LDA );
 
+  extern "C"
+  void SSYRK(const char *      UPLO ,
+            const char *      TRANS,
+            const int *        N ,
+            const int *        K, 
+            const float *     ALPHA, 
+            const float *     A , 
+            const int *       LDA ,
+            const float *    BETA, 
+            float *           C, 
+            const int *        LDC);
 
+  extern "C"
+  void DSYRK(const char *      UPLO ,
+            const char *      TRANS,
+            const int *        N ,
+            const int *        K, 
+            const double *     ALPHA, 
+            const double *     A , 
+            const int *       LDA ,
+            const double *    BETA, 
+            double *           C, 
+            const int *        LDC);
+
+
+  extern "C"
+  void CSYRK(const char *      UPLO ,
+            const char *      TRANS,
+            const int *        N ,
+            const int *        K, 
+            const std::complex<float> *     ALPHA, 
+            const std::complex<float> *     A , 
+            const int *       LDA ,
+            const std::complex<float> *    BETA, 
+            std::complex<float> *           C, 
+            const int *        LDC);
+
+  extern "C"
+  void ZSYRK(const char *      UPLO ,
+            const char *      TRANS,
+            const int *        N ,
+            const int *        K, 
+            const std::complex<double> *     ALPHA, 
+            const std::complex<double> *     A , 
+            const int *       LDA ,
+            const std::complex<double> *    BETA, 
+            std::complex<double> *           C, 
+            const int *        LDC);
+
+  template <typename dtype>
+  void syrk(const char *      UPLO ,
+            const char *      TRANS,
+            const int *        N ,
+            const int *        K, 
+            const dtype *     ALPHA, 
+            const dtype *     A , 
+            const int *       LDA ,
+            const dtype *    BETA, 
+            dtype *           C, 
+            const int *        LDC);
 
  
   extern "C"
-  void SPOSV(char const *       UPLO ,
+  void SPOSV(char *             UPLO ,
             const int *         N, 
             const int *         NRHS,
             float *            A, 
@@ -253,7 +394,7 @@ namespace CTF_BLAS {
  
 
   extern "C"
-  void DPOSV(char const *       UPLO ,
+  void DPOSV(char *             UPLO ,
             const int *         N, 
             const int *         NRHS,
             double *            A, 
@@ -263,7 +404,7 @@ namespace CTF_BLAS {
             int *               INFO);
  
   extern "C"
-  void CPOSV(char const *       UPLO ,
+  void CPOSV(char *             UPLO ,
             const int *         N, 
             const int *         NRHS,
             std::complex<float> *            A, 
@@ -273,7 +414,7 @@ namespace CTF_BLAS {
             int *               INFO);
  
   extern "C"
-  void ZPOSV(char const *       UPLO ,
+  void ZPOSV(char *             UPLO ,
             const int *         N, 
             const int *         NRHS,
             std::complex<double> *            A, 
@@ -283,7 +424,7 @@ namespace CTF_BLAS {
             int *               INFO);
  
   template <typename dtype>
-  void posv(char const *        UPLO ,
+  void posv(char *             UPLO ,
             const int *         N, 
             const int *         NRHS,
             dtype *            A, 
