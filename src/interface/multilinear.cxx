@@ -1752,4 +1752,149 @@ void Solve_Factor_Tucker(Tensor<dtype> * T, Tensor<dtype> ** mat_list, Tensor<dt
       T->sr->pair_dealloc((char*)pairs);
     t_solve_factor.stop();
   }
+
+template<typename dtype>
+  void Sparse_add(Tensor<dtype> * T, Tensor<dtype> * M,double alpha, double beta){
+    IASSERT(T->order == M->order) ;
+    IASSERT(T->is_sparse && M->is_sparse) ;
+
+    int64_t npair1,npair2;
+    Pair<dtype> * pairs1 ; 
+    Pair<dtype> * pairs2 ;
+
+    npair1 = T->nnz_loc ;
+    npair2 = M->nnz_loc ;
+    IASSERT(npair1==npair2);
+    for (int i=0; i<T->order; i++){
+      IASSERT(T->edge_map[i].calc_phys_phase() == M->edge_map[i].calc_phys_phase());
+    }
+    pairs1 = (Pair<dtype> *)T->data;
+    pairs2 = (Pair<dtype> *)M->data;
+
+    /*CTF_int::default_axpy<dtype>(npair1,
+                   dtype         alpha,
+                   dtype const * X,
+                    int           incX,
+                    dtype *       Y,
+                    int           incY)
+                    */
+    for(int64_t i=0;i<npair1;i++){
+       pairs1[i].d = alpha*pairs1[i].d + beta*pairs2[i].d;
+    }
+
+  }
+
+  template<typename dtype>
+  void Sparse_mul(Tensor<dtype> * T, Tensor<dtype> * M){
+    IASSERT(T->order == M->order) ;
+    IASSERT(T->is_sparse && M->is_sparse) ;
+
+    int64_t npair1,npair2;
+    Pair<dtype> * pairs1 ; 
+    Pair<dtype> * pairs2 ;
+
+    npair1 = T->nnz_loc ;
+    npair2 = M->nnz_loc ;
+    IASSERT(npair1==npair2);
+    for (int i=0; i<T->order; i++){
+      IASSERT(T->edge_map[i].calc_phys_phase() == M->edge_map[i].calc_phys_phase());
+    }
+    pairs1 = (Pair<dtype> *)T->data;
+    pairs2 = (Pair<dtype> *)M->data;
+
+    /*CTF_int::default_vec_mul
+                    */
+    for(int64_t i=0;i<npair1;i++){
+       pairs1[i].d *= pairs2[i].d;
+    }
+
+  }
+
+  template<typename dtype>
+  double Sparse_inner_prod(Tensor<dtype> * T, Tensor<dtype> * M){
+    IASSERT(T->order == M->order) ;
+    IASSERT(T->is_sparse && M->is_sparse) ;
+
+    int64_t npair1,npair2;
+    Pair<dtype> * pairs1 ; 
+    Pair<dtype> * pairs2 ;
+
+    npair1 = T->nnz_loc ;
+    npair2 = M->nnz_loc ;
+    IASSERT(npair1==npair2);
+    for (int i=0; i<T->order; i++){
+      IASSERT(T->edge_map[i].calc_phys_phase() == M->edge_map[i].calc_phys_phase());
+    }
+    pairs1 = (Pair<dtype> *)T->data;
+    pairs2 = (Pair<dtype> *)M->data;
+
+    double val=0.0;
+
+    /*CTF_int::default_vec_mul
+                    */
+    for(int64_t i=0;i<npair1;i++){
+       val+= pairs1[i].d *pairs2[i].d;
+    }
+
+    MPI_Allreduce(MPI_IN_PLACE, &val, 1, MPI_DOUBLE, MPI_SUM, T->wrld->comm);
+
+    return val;
+  }
+
+  template<typename dtype>
+  void Sparse_exp(Tensor<dtype> * T){
+    IASSERT(T->is_sparse) ;
+
+    int64_t npair ;
+    Pair<dtype> * pairs ;
+
+    npair = T->nnz_loc ;
+    
+    pairs = (Pair<dtype> *)T->data;
+
+    /*CTF_int::default_vec_mul
+                    */
+    for(int64_t i=0;i<npair;i++){
+       pairs[i].d = std::exp(pairs[i].d);
+    }
+
+  }
+
+  template<typename dtype>
+  void Sparse_log(Tensor<dtype> * T){
+    IASSERT(T->is_sparse) ;
+
+    int64_t npair ;
+    Pair<dtype> * pairs ;
+
+    npair = T->nnz_loc ;
+    
+    pairs = (Pair<dtype> *)T->data;
+
+    /*CTF_int::default_vec_mul
+                    */
+    for(int64_t i=0;i<npair;i++){
+       pairs[i].d = std::log(pairs[i].d);
+    }
+
+  }
+
+  template<typename dtype>
+  void get_index_tensor(Tensor<dtype> * T){
+    IASSERT(T->is_sparse) ;
+    int64_t npair ;
+    Pair<dtype> * pairs ;
+
+    npair = T->nnz_loc ;
+    
+    pairs = (Pair<dtype> *)T->data;
+
+
+    for(int64_t i=0;i<npair;i++){
+       pairs[i].d = 1.0;
+    }
+
+  }
+
+
 }
