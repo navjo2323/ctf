@@ -1471,6 +1471,7 @@ void Solve_Factor_Tucker(Tensor<dtype> * T, Tensor<dtype> ** mat_list, Tensor<dt
         int INCX=1 ; 
         int M,N ;
         int sweeps,outer ;
+        double scalar ;
         //int indices[3];
         
         
@@ -1577,6 +1578,10 @@ void Solve_Factor_Tucker(Tensor<dtype> * T, Tensor<dtype> ** mat_list, Tensor<dt
                   std::copy(output_buf, output_buf + M, input_buf);
                 }
               }
+              scalar = std ::sqrt(pairs[total + q].d) ;
+              
+              std::transform(output_buf, output_buf + R, output_buf,
+                   [scalar](double val) { return val * scalar; }) ;
               
               std::copy(output_buf, output_buf + R, H + q*R);
 
