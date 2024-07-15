@@ -62,6 +62,23 @@ namespace CTF {
   template<typename dtype>
   void Solve_Factor_Tucker(Tensor<dtype> * T, Tensor<dtype> ** mat_list, Tensor<dtype> * core, Tensor<dtype> * RHS, int mode, double regu, bool aux_mode_first);
 
+  template<typename dtype>
+  void Sparse_add(Tensor<dtype> * T, Tensor<dtype> * M,double alpha, double beta);
+
+  template<typename dtype>
+  void Sparse_mul(Tensor<dtype> * T, Tensor<dtype> * M);
+
+  template<typename dtype>
+  double Sparse_inner_prod(Tensor<dtype> * T, Tensor<dtype> * M);
+
+  template<typename dtype>
+  void Sparse_exp(Tensor<dtype> * T);
+
+  template<typename dtype>
+  void Sparse_log(Tensor<dtype> * T);
+
+  template<typename dtype>
+  void get_index_tensor(Tensor<dtype> * T);
 }
 
 #endif
