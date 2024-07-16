@@ -69,6 +69,9 @@ namespace CTF {
   void Sparse_mul(Tensor<dtype> * T, Tensor<dtype> * M);
 
   template<typename dtype>
+  void Sparse_div(Tensor<dtype> * T, Tensor<dtype> * M);
+
+  template<typename dtype>
   double Sparse_inner_prod(Tensor<dtype> * T, Tensor<dtype> * M);
 
   template<typename dtype>
