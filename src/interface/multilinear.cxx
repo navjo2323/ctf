@@ -1816,6 +1816,32 @@ template<typename dtype>
   }
 
   template<typename dtype>
+  void Sparse_div(Tensor<dtype> * T, Tensor<dtype> * M){
+    IASSERT(T->order == M->order) ;
+    IASSERT(T->is_sparse && M->is_sparse) ;
+
+    int64_t npair1,npair2;
+    Pair<dtype> * pairs1 ; 
+    Pair<dtype> * pairs2 ;
+
+    npair1 = T->nnz_loc ;
+    npair2 = M->nnz_loc ;
+    IASSERT(npair1==npair2);
+    for (int i=0; i<T->order; i++){
+      IASSERT(T->edge_map[i].calc_phys_phase() == M->edge_map[i].calc_phys_phase());
+    }
+    pairs1 = (Pair<dtype> *)T->data;
+    pairs2 = (Pair<dtype> *)M->data;
+
+    /*CTF_int::default_vec_mul
+                    */
+    for(int64_t i=0;i<npair1;i++){
+       pairs1[i].d /= pairs2[i].d;
+    }
+
+  }
+
+  template<typename dtype>
   double Sparse_inner_prod(Tensor<dtype> * T, Tensor<dtype> * M){
     IASSERT(T->order == M->order) ;
     IASSERT(T->is_sparse && M->is_sparse) ;
