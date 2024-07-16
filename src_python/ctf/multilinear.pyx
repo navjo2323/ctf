@@ -11,6 +11,7 @@ cdef extern from "ctf.hpp" namespace "CTF":
     cdef void Solve_Factor_Tucker_ "CTF::Solve_Factor_Tucker"[dtype](Tensor[dtype] * T, Tensor[dtype] ** mat_list,Tensor[dtype] * core,Tensor[dtype] * RHS, int mode, double regu, bool aux_mode_first)
     cdef void Sparse_add_ "CTF::Sparse_add"[dtype](Tensor[dtype] * T, Tensor[dtype] * M, double alpha, double beta)
     cdef void Sparse_mul_ "CTF::Sparse_mul"[dtype](Tensor[dtype] * T, Tensor[dtype] * M )
+    cdef void Sparse_div_ "CTF::Sparse_mul"[dtype](Tensor[dtype] * T, Tensor[dtype] * M )
     cdef double Sparse_inner_prod_ "CTF::Sparse_inner_prod"[dtype](Tensor[dtype] * T, Tensor[dtype] * M)
     cdef void Sparse_exp_ "CTF::Sparse_exp"[dtype](Tensor[dtype] * T)
     cdef void Sparse_log_ "CTF::Sparse_log"[dtype](Tensor[dtype] * T)
@@ -273,6 +274,20 @@ def Sparse_mul(tensor A, tensor B):
         Sparse_mul_[double](<Tensor[double]*>A.dt,<Tensor[double]*>B.dt)
     else:
         raise ValueError('CTF PYTHON ERROR: Sparse_mul does not support this dtype')
+    t_sp_add.stop()
+
+def Sparse_div(tensor A, tensor B):
+    """
+    Multiply two sparse tensors A and B with identical distributions
+
+    """
+    t_sp_add = timer("pySparse_div")
+    t_sp_add.start()
+    
+    if A.dtype == np.float64:
+        Sparse_div_[double](<Tensor[double]*>A.dt,<Tensor[double]*>B.dt)
+    else:
+        raise ValueError('CTF PYTHON ERROR: Sparse_div does not support this dtype')
     t_sp_add.stop()
 
 def Sparse_inner_prod(tensor A, tensor B):
