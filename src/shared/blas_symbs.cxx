@@ -80,6 +80,37 @@ namespace CTF_BLAS {
 #undef INST_GEMV
 
   template <typename dtype>
+  void ger(const int *m,
+          const int *n,
+          const dtype *alpha,
+          const dtype *x,
+          const int *incx,
+          const dtype *y,
+          const int *incy,
+          dtype *A,
+          const int *lda) {
+      printf("CTF ERROR: GER not available for this type.\n");
+      assert(0);
+  }
+
+  #define INST_GER(dtype, prefix)                                      \
+  template <>                                                          \
+  void ger<dtype>(const int *a,                                        \
+                  const int *b,                                        \
+                  const dtype *c,                                      \
+                  const dtype *d,                                      \
+                  const int *e,                                        \
+                  const dtype *f,                                      \
+                  const int *g,                                        \
+                  dtype *h,                                            \
+                  const int *i) {                                      \
+      prefix##GER(a, b, c, d, e, f, g, h, i);                          \
+  }
+  INST_GER(float, S)
+  INST_GER(double, D)
+  #undef INST_GER
+
+  template <typename dtype>
   void syr(const char *       UPLO ,
             const int *        N , 
             const dtype *     ALPHA, 
@@ -87,7 +118,7 @@ namespace CTF_BLAS {
             const int *        INCX , 
             dtype *           A , 
             const int *        LDA ){
-     printf("CTF ERROR SYR not available for this type.\n");
+     printf("CTF ERROR POSV not available for this type.\n");
     ASSERT(0);
     assert(0);
   }
@@ -107,7 +138,7 @@ namespace CTF_BLAS {
   INST_SYR(double,D)
   INST_SYR(std::complex<float>,C)
   INST_SYR(std::complex<double>,Z)
-#undef INST_SYR
+#undef INST_GEMM
 
   template <typename dtype>
   void syrk(const char *      UPLO ,
@@ -144,9 +175,9 @@ namespace CTF_BLAS {
   INST_SYRK(std::complex<float>,C)
   INST_SYRK(std::complex<double>,Z)
 #undef INST_SYRK
-
+      
   template <typename dtype>
-  void posv(char *             UPLO ,
+  void posv(char const *        UPLO ,
             const int *         N, 
             const int *         NRHS,
             dtype *            A, 
@@ -163,7 +194,7 @@ namespace CTF_BLAS {
 
 #define INST_POSV(dtype,s)                     \
   template <>                                  \
-  void posv<dtype>(char * a, \
+  void posv<dtype>(char const * a, \
             const int *    b, \
             const int *    c, \
             dtype *        d, \
@@ -177,7 +208,7 @@ namespace CTF_BLAS {
   INST_POSV(double,D)
   INST_POSV(std::complex<float>,C)
   INST_POSV(std::complex<double>,Z)
-#undef INST_POSV
+#undef INST_GEMM
 
 
 
