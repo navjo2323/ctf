@@ -719,6 +719,19 @@ cdef class tensor:
         out_tsr.i(idx_C) << tsr.i(idx_A)*otsr.i(idx_B)
         return out_tsr
 
+    def __rmul__(self, other):
+        if isinstance(other, (int, float, np.number)):
+            idx = ctf.helper._get_num_str(self.ndim)
+            # Create symbolic itensor
+            tsr_i = self.i(idx)
+            tsr_i.scale(other)
+            # Reuse storage without copying values
+            out = tensor(self.shape, sp=self.sp, sym=self.sym, dtype=self.dtype, order=self.order)
+            out.i(idx) << tsr_i
+            return out
+        else:
+            return self.__mul__(other)
+
     def __imul__(self, other_in):
         other = ctf.tensor_aux.astensor(other_in)
         if np.result_type(self.dtype, other.dtype) != self.dtype:

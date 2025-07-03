@@ -7,16 +7,17 @@ from ctf.profile import timer
 cdef extern from "ctf.hpp" namespace "CTF":
     cdef void TTTP_ "CTF::TTTP"[dtype](Tensor[dtype] * T, int num_ops, int * modes, Tensor[dtype] ** mat_list, bool aux_mode_first)
     cdef void MTTKRP_ "CTF::MTTKRP"[dtype](Tensor[dtype] * T, Tensor[dtype] ** mat_list, int mode, bool aux_mode_first)
-    cdef void Solve_Factor_ "CTF::Solve_Factor"[dtype](Tensor[dtype] * T, Tensor[dtype] ** mat_list,Tensor[dtype] * RHS, int mode, double regu, bool aux_mode_first)
-    cdef void Solve_Factor_Tucker_ "CTF::Solve_Factor_Tucker"[dtype](Tensor[dtype] * T, Tensor[dtype] ** mat_list,Tensor[dtype] * core,Tensor[dtype] * RHS, int mode, double regu, bool aux_mode_first)
+    cdef void Solve_Factor_ "CTF::Solve_Factor"[dtype](Tensor[dtype] * T, Tensor[dtype] ** mat_list, Tensor[dtype] * RHS, int mode, Tensor[dtype] *regu, double epsilon, double barrier, bool proj,bool add_ones, bool aux_mode_first)
+    cdef void Solve_Factor_with_RHS_ "CTF::Solve_Factor_with_RHS"[dtype](Tensor[dtype] * T, Tensor[dtype] ** mat_list, Tensor[dtype] * RHS, int mode, double regu, double barrier, bool aux_mode_first)
+    cdef void Solve_Factor_Tucker_ "CTF::Solve_Factor_Tucker"[dtype](Tensor[dtype] * T, Tensor[dtype] ** mat_list, Tensor[dtype] * core, Tensor[dtype] * RHS, int mode, Tensor[dtype] *regu, double epsilon, double barrier, bool proj,bool add_ones, bool aux_mode_first)
     cdef void Sparse_add_ "CTF::Sparse_add"[dtype](Tensor[dtype] * T, Tensor[dtype] * M, double alpha, double beta)
     cdef void Sparse_mul_ "CTF::Sparse_mul"[dtype](Tensor[dtype] * T, Tensor[dtype] * M )
     cdef void Sparse_div_ "CTF::Sparse_div"[dtype](Tensor[dtype] * T, Tensor[dtype] * M )
     cdef double Sparse_inner_prod_ "CTF::Sparse_inner_prod"[dtype](Tensor[dtype] * T, Tensor[dtype] * M)
-    cdef void Sparse_exp_ "CTF::Sparse_exp"[dtype](Tensor[dtype] * T)
+    cdef void Sparse_exp_ "CTF::Sparse_exp"[dtype](Tensor[dtype] * T, double alpha)
     cdef void Sparse_log_ "CTF::Sparse_log"[dtype](Tensor[dtype] * T)
+    cdef void Sparse_sigmoid_ "CTF::Sparse_sigmoid"[dtype](Tensor[dtype] * T, double alpha, double eps)
     cdef void get_index_tensor_ "CTF::get_index_tensor"[dtype](Tensor[dtype] * T)
-    
 def TTTP(tensor A, mat_list):
     """
     TTTP(A, mat_list)
@@ -137,12 +138,75 @@ def MTTKRP(tensor A, mat_list, mode):
     free(tsrs)
     t_mttkrp.stop()
 
-def Solve_Factor(tensor A, mat_list, tensor R, mode,regu):
+def Solve_Factor(tensor A, mat_list, tensor R, mode, tensor regu, epsilon, barrier= None, proj = False, add_ones = False):
     """
     Solve_Factor(A, mat_list,R, mode,regu)
-    solves for a factor matrix parallelizing over rows given rhs, sparse tensor and list of factor matrices
-    eg. for mode=0 order 3 tensor Computes LHS = einsum("ijk,jr,jz,kr,kz->irz",T,B,B,C,C) and solves each row with rhs
-    in parallel 
+    solves for a factor matrix parallelizing over rows constructing rhs, sparse tensor and list of factor matrices
+    eg. for mode=0 order 3 tensor Computes LHS = einsum("ijk,jr,jz,kr,kz->irz",T,B,B,C,C) and 
+    RHS = einsum("ijk,jr,kr->ir",T,B,C) then solves the rows on the fly.
+    Also adds barrier to the lhs and rhs for nonnegativity
+    Parameters
+    ----------
+    A: tensor_like
+       Input tensor of arbitrary ndim
+
+    mat_list: list of size A.ndim containing matrices that are n_i-by-R where n_i is dimension of ith mode of A
+    and mat_list[mode] will contain the output
+    
+    R: Like input tensor A, needed for RHS construction
+
+    mode: integer for mode with 0 indexing
+
+    """
+    t_solve_factor = timer("pySolve_factor")
+    t_solve_factor.start()
+    if R.ndim != A.ndim:
+        raise ValueError('CTF PYTHON ERROR: Both tensors should of same dimensions')
+    if len(mat_list) != A.ndim:
+        raise ValueError('CTF PYTHON ERROR: mat_list argument to Solve_Factor must be of same length as ndim')
+    k = -1
+    tsrs = <Tensor[double]**>malloc(len(mat_list)*sizeof(ctensor*))
+    #tsr_list = []
+    imode = 0
+    cdef tensor t
+    if barrier is None:
+        barrier = -1.0
+
+    
+    for i in range(len(mat_list))[::-1]:
+        t = mat_list[i]
+        tsrs[imode] = <Tensor[double]*>t.dt
+        imode += 1
+        if mat_list[i].ndim == 1:
+            if k != -1:
+                raise ValueError('CTF PYTHON ERROR: mat_list must contain only vectors or only matrices')
+            if mat_list[i].shape[0] != A.shape[i]:
+                raise ValueError('CTF PYTHON ERROR: input vector to SOLVE_FACTOR does not match the corresponding tensor dimension')
+            # if A.shape[i] != R.shape[i]:
+            #     raise ValueError('CTF PYTHON ERROR: Tensor dimensions for mode',i,'do not match')
+            #exp = exp*mat_list[i].i(s[i])
+        else:
+            if mat_list[i].ndim != 2:
+                raise ValueError('CTF PYTHON ERROR: mat_list operands has invalid dimension')
+            if k == -1:
+                k = mat_list[i].shape[1]
+            else:
+                if k != mat_list[i].shape[1]:
+                    raise ValueError('CTF PYTHON ERROR: mat_list second mode lengths of tensor must match')
+    B = tensor(copy=A)
+    RHS = tensor(copy=R)
+    reg = tensor(copy=regu)
+    if A.dtype == np.float64:
+        Solve_Factor_[double](<Tensor[double]*>B.dt,tsrs,<Tensor[double]*>RHS.dt,A.ndim-mode-1,<Tensor[double]*>reg.dt, epsilon, barrier, proj, add_ones, 1)
+    else:
+        raise ValueError('CTF PYTHON ERROR: Solve_Factor does not support this dtype')
+    free(tsrs)
+    t_solve_factor.stop()
+
+def Solve_Factor_with_RHS(tensor A, mat_list, tensor R, mode,regu, barrier= 0.0):
+    """
+    Solve_Factor(A, mat_list,R, mode,regu)
+    when RHS is given to us
     
     Parameters
     ----------
@@ -152,7 +216,7 @@ def Solve_Factor(tensor A, mat_list, tensor R, mode,regu):
     mat_list: list of size A.ndim containing matrices that are n_i-by-R where n_i is dimension of ith mode of A
     and mat_list[mode] will contain the output
     
-    R: ctf array Right hand side of dimension I_{mode} x R
+    R: Like input tensor A, needed for RHS construction
 
     mode: integer for mode with 0 indexing
 
@@ -166,6 +230,7 @@ def Solve_Factor(tensor A, mat_list, tensor R, mode,regu):
     #tsr_list = []
     imode = 0
     cdef tensor t
+        
     for i in range(len(mat_list))[::-1]:
         t = mat_list[i]
         tsrs[imode] = <Tensor[double]*>t.dt
@@ -175,6 +240,8 @@ def Solve_Factor(tensor A, mat_list, tensor R, mode,regu):
                 raise ValueError('CTF PYTHON ERROR: mat_list must contain only vectors or only matrices')
             if mat_list[i].shape[0] != A.shape[i]:
                 raise ValueError('CTF PYTHON ERROR: input vector to SOLVE_FACTOR does not match the corresponding tensor dimension')
+            if A.shape[i] != R.shape[i]:
+                raise ValueError('CTF PYTHON ERROR: Tensor dimensions for mode',i,'do not match')
             #exp = exp*mat_list[i].i(s[i])
         else:
             if mat_list[i].ndim != 2:
@@ -187,19 +254,18 @@ def Solve_Factor(tensor A, mat_list, tensor R, mode,regu):
     B = tensor(copy=A)
     RHS = tensor(copy=R)
     if A.dtype == np.float64:
-        Solve_Factor_[double](<Tensor[double]*>B.dt,tsrs,<Tensor[double]*>RHS.dt,A.ndim-mode-1,regu,1)
+        Solve_Factor_with_RHS_[double](<Tensor[double]*>B.dt,tsrs,<Tensor[double]*>RHS.dt,A.ndim-mode-1,regu, barrier ,1)
     else:
         raise ValueError('CTF PYTHON ERROR: Solve_Factor does not support this dtype')
     free(tsrs)
     t_solve_factor.stop()
 
-def Solve_Factor_Tucker(tensor A, mat_list, tensor C, tensor R, mode,regu):
+def Solve_Factor_Tucker(tensor A, mat_list, tensor C, tensor R, mode, tensor regu, epsilon, barrier= None, proj = False, add_ones = False):
     """
-    Solve_Factor_Tucker(A, mat_list,core,R, mode,regu)
-    solves for a factor matrix parallelizing over rows given rhs, sparse tensor and list of factor matrices
-    eg. for mode=0 order 3 tensor Computes LHS = einsum("ijk,jr,jz,kr,kz->irz",T,B,B,C,C) and solves each row with rhs
-    in parallel 
-    
+    solves for a factor matrix parallelizing over rows constructing rhs, sparse tensor and list of factor matrices
+    eg. for mode=0 order 3 tensor Computes LHS = einsum("ijk,jr,jz,kr,kz->irz",T,B,B,C,C) and 
+    RHS = einsum("ijk,jr,kr->ir",T,B,C) then solves the rows on the fly.
+    Also adds barrier to the lhs and rhs for nonnegativity
     Parameters
     ----------
     A: tensor_like
@@ -208,20 +274,26 @@ def Solve_Factor_Tucker(tensor A, mat_list, tensor C, tensor R, mode,regu):
     mat_list: list of size A.ndim containing matrices that are n_i-by-R where n_i is dimension of ith mode of A
     and mat_list[mode] will contain the output
     
-    R: ctf array Right hand side of dimension I_{mode} x R
+    R: Like input tensor A, needed for RHS construction
 
     mode: integer for mode with 0 indexing
 
     """
     t_solve_factor_t = timer("pySolve_factor_Tucker")
     t_solve_factor_t.start()
+    if R.ndim != A.ndim:
+        raise ValueError('CTF PYTHON ERROR: Both tensors should of same dimensions')
     if len(mat_list) != A.ndim:
-        raise ValueError('CTF PYTHON ERROR: mat_list argument to Solve_Factor_Tucker must be of same length as ndim')
+        raise ValueError('CTF PYTHON ERROR: mat_list argument to Solve_Factor must be of same length as ndim')
     k = -1
     tsrs = <Tensor[double]**>malloc(len(mat_list)*sizeof(ctensor*))
     #tsr_list = []
     imode = 0
     cdef tensor t
+    if barrier is None:
+        barrier = -1.0
+
+    
     for i in range(len(mat_list))[::-1]:
         t = mat_list[i]
         tsrs[imode] = <Tensor[double]*>t.dt
@@ -230,21 +302,20 @@ def Solve_Factor_Tucker(tensor A, mat_list, tensor C, tensor R, mode,regu):
             if k != -1:
                 raise ValueError('CTF PYTHON ERROR: mat_list must contain only vectors or only matrices')
             if mat_list[i].shape[0] != A.shape[i]:
-                raise ValueError('CTF PYTHON ERROR: input vector to SOLVE_FACTOR_TUCKER does not match the corresponding tensor dimension')
-                        #exp = exp*mat_list[i].i(s[i])
+                raise ValueError('CTF PYTHON ERROR: input vector to SOLVE_FACTOR does not match the corresponding tensor dimension')
+            # if A.shape[i] != R.shape[i]:
+            #     raise ValueError('CTF PYTHON ERROR: Tensor dimensions for mode',i,'do not match')
+            #exp = exp*mat_list[i].i(s[i])
         else:
             if mat_list[i].ndim != 2:
                 raise ValueError('CTF PYTHON ERROR: mat_list operands has invalid dimension')
-            # Add for core dimensions should match
-            if k == -1:
-                if mat_list[i].shape[1] != C.shape[i]:
-                    raise ValueError('CTF PYTHON ERROR: input matrix to SOLVE_FACTOR_TUCKER does not match the corresponding Core dimension')
     B = tensor(copy=A)
     RHS = tensor(copy=R)
+    reg = tensor(copy=regu)
     if A.dtype == np.float64:
-        Solve_Factor_Tucker_[double](<Tensor[double]*>B.dt,tsrs,<Tensor[double]*>C.dt,<Tensor[double]*>RHS.dt,A.ndim-mode-1,regu,1)
+        Solve_Factor_Tucker_[double](<Tensor[double]*>B.dt,tsrs,<Tensor[double]*>C.dt,<Tensor[double]*>RHS.dt,A.ndim-mode-1,<Tensor[double]*>reg.dt, epsilon, barrier, proj, add_ones, 1)
     else:
-        raise ValueError('CTF PYTHON ERROR: Solve_Factor_Tucker does not support this dtype')
+        raise ValueError('CTF PYTHON ERROR: Solve_Factor does not support this dtype')
     free(tsrs)
     t_solve_factor_t.stop()
 
@@ -275,7 +346,7 @@ def Sparse_mul(tensor A, tensor B):
     else:
         raise ValueError('CTF PYTHON ERROR: Sparse_mul does not support this dtype')
     t_sp_add.stop()
-
+    
 def Sparse_div(tensor A, tensor B):
     """
     Multiply two sparse tensors A and B with identical distributions
@@ -309,7 +380,7 @@ def Sparse_inner_prod(tensor A, tensor B):
 
 
 
-def Sparse_exp(tensor A):
+def Sparse_exp(tensor A, alpha=1.0):
     """
     Multiply two sparse tensors A and B with identical distributions
 
@@ -318,7 +389,7 @@ def Sparse_exp(tensor A):
     t_sp_exp.start()
     
     if A.dtype == np.float64:
-        Sparse_exp_[double](<Tensor[double]*>A.dt)
+        Sparse_exp_[double](<Tensor[double]*>A.dt, alpha)
     else:
         raise ValueError('CTF PYTHON ERROR: Sparse_exp does not support this dtype')
     t_sp_exp.stop()
@@ -337,9 +408,23 @@ def Sparse_log(tensor A):
         raise ValueError('CTF PYTHON ERROR: Sparse_log does not support this dtype')
     t_sp_log.stop()
 
+def Sparse_sigmoid(tensor A, alpha = 1.0, eps = 0.0):
+    """
+    Take reciprocal
+
+    """
+    t_sp_log = timer("pySparse_sigmoid")
+    t_sp_log.start()
+    
+    if A.dtype == np.float64:
+        Sparse_sigmoid_[double](<Tensor[double]*>A.dt, alpha, eps)
+    else:
+        raise ValueError('CTF PYTHON ERROR: Sparse_log does not support this dtype')
+    t_sp_log.stop()
+
 def get_index_tensor(tensor A):
     """
-    Multiply two sparse tensors A and B with identical distributions
+    Get index tensor 
 
     """
     t_ind_tnsr = timer("pyget_index_tensor")
@@ -350,4 +435,3 @@ def get_index_tensor(tensor A):
     else:
         raise ValueError('CTF PYTHON ERROR: get_index_tensor does not support this dtype')
     t_ind_tnsr.stop()
-

@@ -169,21 +169,53 @@ class KnowValues(unittest.TestCase):
                 ctf.MTTKRP(A, mats, i)
                 self.assertTrue(allclose(ans, mats[i]))
 
+    # def test_Solve_Factor_mat(self):
+    #     R = 10
+    #     for N in range(3,6):
+    #         mats = []
+    #         num = np.random.randint(N)
+    #         lens = np.random.randint(10,20,N)
+    #         regu = 1e-04
+    #         for i in range(N):
+    #             if i !=num:
+    #                 mats.append(ctf.random.random([lens[i],R]))
+    #             else:
+    #                 mats.append(ctf.tensor([lens[i],R]))
+    #         RHS = ctf.random.random([lens[num],R])
+    #         A = ctf.tensor(lens,sp=1)
+    #         A.fill_sp_random(1., 1., 0.5)
+    #         lst_mat = []
+    #         T_inds = "".join([chr(ord('a')+i) for i in range(A.ndim)])
+    #         einstr=""
+    #         for i in range(N):
+    #             if i != num:
+    #                 einstr+=chr(ord('a')+i) + 'r' + ','
+    #                 lst_mat.append(mats[i].to_nparray())
+    #                 einstr+=chr(ord('a')+i) + 'z' + ','
+    #                 lst_mat.append(mats[i].to_nparray())
+    #         einstr+= T_inds + "->"+chr(ord('a')+num)+'rz'
+    #         lst_mat.append(A.to_nparray())
+    #         lhs_np =np.einsum(einstr,*lst_mat,optimize=True)
+    #         rhs_np = RHS.to_nparray()
+    #         ans = np.zeros_like(rhs_np)
+    #         for i in range(mats[num].shape[0]):
+    #             ans[i,:] = la.solve(lhs_np[i]+regu*np.eye(R),rhs_np[i,:])
+    #         ctf.Solve_Factor(A,mats,RHS,num,regu)
+    #         self.assertTrue(np.allclose(ans, mats[num].to_nparray()))
+    
     def test_Solve_Factor_mat(self):
-        R = 10
+        R = 8
         for N in range(3,6):
             mats = []
             num = np.random.randint(N)
             lens = np.random.randint(10,20,N)
-            regu = 1e-04
+            regu = 1e-4
             for i in range(N):
-                if i !=num:
-                    mats.append(ctf.random.random([lens[i],R]))
-                else:
-                    mats.append(ctf.tensor([lens[i],R]))
-            RHS = ctf.random.random([lens[num],R])
-            A = ctf.tensor(lens,sp=1)
-            A.fill_sp_random(1., 1., 0.5)
+                mats.append(ctf.random.random([lens[i],R]))
+            RHS = ctf.tensor(lens,sp=1)
+            RHS.fill_sp_random(-1., 1., 0.2)
+            A = RHS.copy()
+            ctf.get_index_tensor(A)
             lst_mat = []
             T_inds = "".join([chr(ord('a')+i) for i in range(A.ndim)])
             einstr=""
@@ -195,30 +227,127 @@ class KnowValues(unittest.TestCase):
                     lst_mat.append(mats[i].to_nparray())
             einstr+= T_inds + "->"+chr(ord('a')+num)+'rz'
             lst_mat.append(A.to_nparray())
-            lhs_np =np.einsum(einstr,*lst_mat,optimize=True)
-            rhs_np = RHS.to_nparray()
+            lhs_np = np.einsum(einstr,*lst_mat,optimize=True)
+
+            lst_mat= []
+            T_inds = "".join([chr(ord('a')+i) for i in range(A.ndim)])
+            einstr=""
+            for i in range(N):
+                if i != num:
+                    einstr+=chr(ord('a')+i) + 'r' + ','
+                    lst_mat.append(mats[i].to_nparray())
+            einstr+= T_inds + "->"+chr(ord('a')+num)+'r'
+            lst_mat.append(RHS.to_nparray())
+            rhs_np = np.einsum(einstr,*lst_mat,optimize=True)
+            barrier = None
+            proj = True
+            add_ones = True
+            eps = 0.9
+            mats_np = mats[num].to_nparray()
+            if add_ones:
+                rhs_np -= np.ones_like(rhs_np)
             ans = np.zeros_like(rhs_np)
-            for i in range(mats[num].shape[0]):
-                ans[i,:] = la.solve(lhs_np[i]+regu*np.eye(R),rhs_np[i,:])
-            ctf.Solve_Factor(A,mats,RHS,num,regu)
+            nrms = la.norm(( mats_np -  (mats_np + rhs_np).clip(0)) , axis=1)
+            thresholds = np.minimum(nrms , eps)
+            regu_arr = regu*ctf.random.random(mats[num].shape[0])
+            for i in range(mats_np.shape[0]):
+                # Cache original RHS before modifications
+                rhs_orig = rhs_np[i].copy()
+            
+                if barrier is not None:
+                    assert proj is False, "Projection must be off when barrier is not none"
+                    reg_matrix = regu_arr.to_nparray()[i] * np.eye(R)
+                    barrier_diag = np.diag(barrier / (mats_np[i] * mats_np[i] + 1e-10))
+                    lhs = lhs_np[i] + reg_matrix + barrier_diag
+                    rhs = rhs_np[i] + barrier/ (mats_np[i] + 1e-10)
+            
+            
+                    ans[i] = la.solve(lhs, rhs)
+            
+                elif proj:
+                    assert barrier is None, "barrier must be None when projection is enabled"
+            
+                    # Selection logic
+                    is_rhs_nonpos = rhs_np[i] <= 0.0
+                    is_mat_zero = mats_np[i] == 0.0
+                    is_mat_small = (mats_np[i] > 0.0) & (mats_np[i] <= thresholds[i])
+                    unselected_mask = is_rhs_nonpos & (is_mat_zero | is_mat_small)
+                    selected_mask = ~unselected_mask
+                    selected_indices = np.where(selected_mask)[0]
+            
+                    if selected_indices.size > 0:
+                        lhs_active = lhs_np[i][np.ix_(selected_indices, selected_indices)]
+                        rhs_active = rhs_orig[selected_indices]
+                        lhs = lhs_active + regu_arr.to_nparray()[i] * np.eye(selected_indices.size)
+                        rhs = rhs_active
+            
+                        sol_active = la.solve(lhs, rhs)
+                        ans[i, selected_indices] = sol_active
+            
+                    for idx in np.where(unselected_mask)[0]:
+                        ans[i, idx] = rhs_orig[idx] if mats_np[i, idx] > 0.0 else 0.0
+            
+                else:
+                    assert barrier is None, "barrier must be None when projection is enabled"
+                    assert proj is False, "No projection as well"
+                    lhs = lhs_np[i] + regu_arr.to_nparray()[i] * np.eye(R)
+                    rhs = rhs_np[i]
+            
+            
+                    ans[i] = la.solve(lhs, rhs)
+            ctf.Solve_Factor(A,mats,RHS,num,regu_arr,eps, barrier, proj, add_ones)
+            
             self.assertTrue(np.allclose(ans, mats[num].to_nparray()))
 
+    # def test_Solve_Factor_with_RHS(self):
+    #     R = 10
+    #     for N in range(3,6):
+    #         mats = []
+    #         num = np.random.randint(N)
+    #         lens = np.random.randint(10,20,N)
+    #         regu = 1e-04
+    #         for i in range(N):
+    #             mats.append(ctf.random.random([lens[i],R]))
+    #         A = ctf.tensor(lens,sp=1)
+    #         A.fill_sp_random(0.1, 1., 0.2)
+    #         lst_mat = []
+    #         T_inds = "".join([chr(ord('a')+i) for i in range(A.ndim)])
+    #         einstr=""
+    #         for i in range(N):
+    #             if i != num:
+    #                 einstr+=chr(ord('a')+i) + 'r' + ','
+    #                 lst_mat.append(mats[i].to_nparray())
+    #                 einstr+=chr(ord('a')+i) + 'z' + ','
+    #                 lst_mat.append(mats[i].to_nparray())
+    #         einstr+= T_inds + "->"+chr(ord('a')+num)+'rz'
+    #         lst_mat.append(A.to_nparray())
+    #         lhs_np = np.einsum(einstr,*lst_mat,optimize=True)
+    #         RHS = ctf.random.random(mats[num].shape)
+    #         rhs_np = RHS.to_nparray()
+    #         barrier = 0.01
+    #         mats_np = mats[num].to_nparray()
+    #         rhs_np += barrier/(mats_np + 1e-10)
+    #         ans = np.zeros_like(rhs_np)
+    #         for i in range(mats_np.shape[0]):
+    #             ans[i,:] = la.solve(lhs_np[i]+regu*np.eye(R) + np.diag(barrier/ (mats_np[i,:]*mats_np[i,:] + 1e-10) ),
+    #                                 rhs_np[i,:] )
+    #         ctf.Solve_Factor_with_RHS(A,mats,RHS,num,regu,barrier)
+    #         self.assertTrue(np.allclose(ans, mats[num].to_nparray()))
+            
     def test_Solve_Factor_Tucker(self):
         for N in range(3,6):
             mats = []
             num = np.random.randint(N)
-            lens = np.random.randint(10,25,N)
+            lens = np.random.randint(10,20,N)
             ranks = np.random.randint(2,6,N)
-            regu = 1e-04
+            regu = 1e-4
             for i in range(N):
-                if i !=num:
-                    mats.append(ctf.random.random([lens[i],ranks[i]]))
-                else:
-                    mats.append(ctf.tensor([lens[i],ranks[i]]))
-            RHS = ctf.random.random([lens[num],ranks[num]])
+                mats.append(ctf.random.random([lens[i],ranks[i]]))
+            RHS = ctf.tensor(lens,sp=1)
+            RHS.fill_sp_random(-1., 1., 0.2)
             core = ctf.random.random(ranks)
-            A = ctf.tensor(lens,sp=1)
-            A.fill_sp_random(1., 1., 0.2)
+            A = RHS.copy()
+            ctf.get_index_tensor(A)
             T_inds = "".join([chr(ord('a')+i) for i in range(A.ndim)])
             core_inds = "".join([chr(ord('r')+i) for i in range(core.ndim)])
             core_inds2 = "".join([chr(ord('l')+i) for i in range(core.ndim)])
@@ -235,11 +364,76 @@ class KnowValues(unittest.TestCase):
             lst_mat.append(core.to_nparray())
             einstr+= core_inds + ','+core_inds2+'->'+chr(ord('a')+num)+chr(ord('r')+num)+chr(ord('l')+num)
             lhs_np = np.einsum(einstr,*lst_mat,optimize=True)
-            rhs_np = RHS.to_nparray()
+
+            lst_mat= []
+            T_inds = "".join([chr(ord('a')+i) for i in range(A.ndim)])
+            einstr=""
+            for i in range(N):
+                if i != num:
+                    einstr+=chr(ord('a')+i) + chr(ord('r')+i) + ','
+                    lst_mat.append(mats[i].to_nparray())
+            core_inds = "".join([chr(ord('r')+i) for i in range(core.ndim)])
+            lst_mat.append(core.to_nparray())
+            einstr+= core_inds + ','
+            einstr+= T_inds + "->"+chr(ord('a')+num)+ chr(ord('r')+num)
+            lst_mat.append(RHS.to_nparray())
+            rhs_np = np.einsum(einstr,*lst_mat,optimize=True)
+            barrier = None
+            proj = True
+            add_ones = True
+            eps = 0.9
+            mats_np = mats[num].to_nparray()
+            if add_ones:
+                rhs_np -= np.ones_like(rhs_np)
             ans = np.zeros_like(rhs_np)
-            for i in range(mats[num].shape[0]):
-                ans[i,:] = la.solve(lhs_np[i]+regu*np.eye(ranks[num]),rhs_np[i,:])
-            ctf.Solve_Factor_Tucker(A,mats,core,RHS,num,regu)
+            nrms = la.norm(( mats_np -  (mats_np + rhs_np).clip(0)) , axis=1)
+            thresholds = np.minimum(nrms , eps)
+            regu_arr = regu*ctf.random.random(mats[num].shape[0])
+            for i in range(mats_np.shape[0]):
+                # Cache original RHS before modifications
+                rhs_orig = rhs_np[i].copy()
+            
+                if barrier is not None:
+                    assert proj is False, "Projection must be off when barrier is not none"
+                    reg_matrix = regu_arr.to_nparray()[i] * np.eye(R)
+                    barrier_diag = np.diag(barrier / (mats_np[i] * mats_np[i] + 1e-10))
+                    lhs = lhs_np[i] + reg_matrix + barrier_diag
+                    rhs = rhs_np[i] + barrier/ (mats_np[i] + 1e-10)
+            
+                    ans[i] = la.solve(lhs, rhs)
+            
+                elif proj:
+                    assert barrier is None, "barrier must be None when projection is enabled"
+            
+                    # Selection logic
+                    is_rhs_nonpos = rhs_np[i] <= 0.0
+                    is_mat_zero = mats_np[i] == 0.0
+                    is_mat_small = (mats_np[i] > 0.0) & (mats_np[i] <= thresholds[i])
+                    unselected_mask = is_rhs_nonpos & (is_mat_zero | is_mat_small)
+                    selected_mask = ~unselected_mask
+                    selected_indices = np.where(selected_mask)[0]
+            
+                    if selected_indices.size > 0:
+                        lhs_active = lhs_np[i][np.ix_(selected_indices, selected_indices)]
+                        rhs_active = rhs_orig[selected_indices]
+                        lhs = lhs_active + regu_arr.to_nparray()[i] * np.eye(selected_indices.size)
+                        rhs = rhs_active
+            
+                        sol_active = la.solve(lhs, rhs)
+                        ans[i, selected_indices] = sol_active
+            
+                    for idx in np.where(unselected_mask)[0]:
+                        ans[i, idx] = rhs_orig[idx] if mats_np[i, idx] > 0.0 else 0.0
+            
+                else:
+                    assert barrier is None, "barrier must be None when projection is enabled"
+                    assert proj is False, "No projection as well"
+                    lhs = lhs_np[i] + regu_arr.to_nparray()[i] * np.eye(R)
+                    rhs = rhs_np[i]
+            
+            
+                    ans[i] = la.solve(lhs, rhs)
+            ctf.Solve_Factor_Tucker(A,mats,core,RHS,num,regu_arr,eps, barrier, proj, add_ones)
             self.assertTrue(np.allclose(ans, mats[num].to_nparray()))
 
     def test_TTTP_vec(self):
@@ -308,3 +502,4 @@ if __name__ == "__main__":
     result = run_tests()
     ctf.MPI_Stop()
     sys.exit(not result)
+    

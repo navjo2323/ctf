@@ -54,20 +54,22 @@ namespace CTF {
   void MTTKRP(Tensor<dtype> * T, Tensor<dtype> ** mat_list, int mode, bool aux_mode_first);
   /**
     * \brief Compute solve for tensor completion type eqns in parallel with input tensor T and list of matrices
-      
   */
   template<typename dtype>
-  void Solve_Factor(Tensor<dtype> * T, Tensor<dtype> ** mat_list, Tensor<dtype> * RHS, int mode, double regu, bool aux_mode_first);
+  void Solve_Factor(Tensor<dtype> * T, Tensor<dtype> ** mat_list, Tensor<dtype> * RHS, int mode, Tensor<dtype> *regu, double epsilon, double barrier, bool proj, bool add_ones, bool aux_mode_first);
 
   template<typename dtype>
-  void Solve_Factor_Tucker(Tensor<dtype> * T, Tensor<dtype> ** mat_list, Tensor<dtype> * core, Tensor<dtype> * RHS, int mode, double regu, bool aux_mode_first);
+  void Solve_Factor_with_RHS(Tensor<dtype> * T, Tensor<dtype> ** mat_list, Tensor<dtype> * RHS, int mode, double regu, double barrier, bool aux_mode_first);
+  
+  template<typename dtype>
+  void Solve_Factor_Tucker(Tensor<dtype> * T, Tensor<dtype> ** mat_list, Tensor<dtype> * core, Tensor<dtype> * RHS, int mode, Tensor <dtype>* regu, double epsilon, double barrier,  bool proj, bool add_ones, bool aux_mode_first);
 
   template<typename dtype>
   void Sparse_add(Tensor<dtype> * T, Tensor<dtype> * M,double alpha, double beta);
 
   template<typename dtype>
   void Sparse_mul(Tensor<dtype> * T, Tensor<dtype> * M);
-
+    
   template<typename dtype>
   void Sparse_div(Tensor<dtype> * T, Tensor<dtype> * M);
 
@@ -75,13 +77,22 @@ namespace CTF {
   double Sparse_inner_prod(Tensor<dtype> * T, Tensor<dtype> * M);
 
   template<typename dtype>
-  void Sparse_exp(Tensor<dtype> * T);
+  void Sparse_exp(Tensor<dtype> * T, double alpha);
 
   template<typename dtype>
   void Sparse_log(Tensor<dtype> * T);
 
   template<typename dtype>
+  void Sparse_sigmoid(Tensor<dtype> * T, double alpha, double eps);
+
+  template<typename dtype>
   void get_index_tensor(Tensor<dtype> * T);
+
+  template<typename dtype>
+  void spttn_kernel(Tensor<dtype> * A, Tensor<dtype> ** Bs, int nBs, const char * einsum_expr, std::string * terms, int nterms, std::string * index_order, int max_buf_dim = 2);
+
+  template<typename dtype>
+  void spttn_kernel(Tensor<dtype> * A, Tensor<dtype> ** B, int nBs, const char * einsum_expr, int max_buf_dim = 2);
 }
 
 #endif

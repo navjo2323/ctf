@@ -86,6 +86,14 @@ cdef class term:
             second.scale(first)
             return second
 
+    def __rmul__(self, other):
+        if isinstance(other, (int, float, np.double, np.number)):
+            # Apply scalar multiplication
+            self.scale(other)
+            return self
+        else:
+            return self.__mul__(other)
+
     def __dealloc__(self):
         del self.tm
 
@@ -279,5 +287,4 @@ cdef class itensor(term):
         free(ctsrs)
         t_svd.stop()
         return [U, S, VT]
-
 
